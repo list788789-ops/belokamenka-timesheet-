@@ -25,6 +25,7 @@ from reorganize import reorganize
 from employees_sheet import create_employees_sheet
 from rebuild_daynight import rebuild_daynight
 from refresh_validation import refresh_validation
+from setup_users import setup_users
 
 from maxapi import Bot, Dispatcher, F
 from maxapi.types import MessageCreated, BotStarted, Command, MessageCallback, CallbackButton
@@ -52,13 +53,38 @@ def _day_label(day: int) -> str:
     return f"{day} {_MONTHS_GEN[datetime.now().month - 1]}"
 
 
-def _is_foreman(event) -> bool:
-    if not FOREMAN_CHAT_ID:
+async def _is_foreman(event) -> bool:
+    """
+    Разрешён ли пользователь. Если его нет в списке — шлём заявку админам
+    и возвращаем False.
+    """
+    cid = _chat_id(event)
+    allowed = await asyncio.to_thread(sheets.is_allowed, cid)
+    if allowed:
         return True
+    # Незнакомый — отправляем заявку админам
+    await _send_access_request(event, cid)
+    return False
+
+
+async def _send_access_request(event, cid: int):
+    """Сообщает пользователю о заявке и шлёт админам кнопку добавления."""
     try:
-        return event.message.recipient.chat_id == FOREMAN_CHAT_ID
+        await event.message.answer(
+            "Вы не в списке пользователей. Запрос на добавление отправлен админу.")
     except Exception:
-        return True
+        pass
+    admins = await asyncio.to_thread(sheets.get_admins)
+    for admin_id in admins:
+        kb = InlineKeyboardBuilder()
+        kb.row(CallbackButton(text="➕ Добавить прораба", payload=f"adduser:{cid}"))
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=f"Запрос доступа. Новый пользователь chat_id: {cid}",
+                attachments=[kb.as_markup()])
+        except Exception:
+            log.warning("Не удалось уведомить админа %s", admin_id)
 
 
 # ================= МЕНЮ =================
@@ -89,6 +115,27 @@ async def show_menu(event: MessageCreated):
 @dp.message_created(Command("chatid"))
 async def show_chat_id(event: MessageCreated):
     await event.message.answer(f"chat_id этого чата: {event.message.recipient.chat_id}")
+
+
+@dp.message_callback(F.callback.payload.startswith("adduser:"))
+async def cb_add_user(event: MessageCallback):
+    """Админ добавляет нового прораба по заявке."""
+    admin_id = _chat_id(event)
+    role = await asyncio.to_thread(sheets.get_role, admin_id)
+    if role != sheets.ROLE_ADMIN:
+        await event.message.answer("Только админ может добавлять пользователей.")
+        return
+    new_id = int(event.callback.payload.split(":")[1])
+    ok = await asyncio.to_thread(sheets.add_user, new_id, "Прораб", sheets.ROLE_FOREMAN)
+    if ok:
+        await _finish(event, f"✅ Пользователь {new_id} добавлен как прораб.")
+        try:
+            await bot.send_message(chat_id=new_id,
+                                   text="Вам открыт доступ. Отправьте /menu.")
+        except Exception:
+            pass
+    else:
+        await _finish(event, f"Пользователь {new_id} уже в списке.")
 
 
 # ================= ТАБЕЛЬ ЗА СЕГОДНЯ =================
@@ -216,7 +263,7 @@ async def _send_morning_list(target, page: int, edit_event=None):
 
 @dp.message_callback(F.callback.payload == "menu:morning")
 async def cb_menu_morning(event: MessageCallback):
-    if not _is_foreman(event):
+    if not await _is_foreman(event):
         return
     s = _sess(event)
     s["morning"]["page"] = 0
@@ -503,7 +550,7 @@ async def cb_evening_clear_do(event: MessageCallback):
 
 @dp.message_callback(F.callback.payload == "menu:evening")
 async def cb_menu_evening(event: MessageCallback):
-    if not _is_foreman(event):
+    if not await _is_foreman(event):
         return
     _sess(event)["evening"]["page"] = 0
     await _send_evening_list(event.message, 0)
@@ -533,7 +580,7 @@ async def cb_evening_done(event: MessageCallback):
 
 @dp.message_callback(F.callback.payload == "menu:fire")
 async def cb_menu_fire(event: MessageCallback):
-    if not _is_foreman(event):
+    if not await _is_foreman(event):
         return
     _sess(event)["fire"].update({"page": 0, "day": None, "name": None, "awaiting_day": False})
     await _send_fire_list(event.message, 0)
@@ -553,7 +600,7 @@ async def cb_menu_fired(event: MessageCallback):
 
 @dp.message_callback(F.callback.payload == "menu:clearall")
 async def cb_menu_clearall(event: MessageCallback):
-    if not _is_foreman(event):
+    if not await _is_foreman(event):
         return
     kb = InlineKeyboardBuilder()
     kb.row(
@@ -746,6 +793,13 @@ async def main():
             log.info("Выпадающие списки обновлены (МУ) на 12 листах.")
         except Exception as e:
             log.exception("Ошибка обновления списков: %s", e)
+
+    if os.getenv("RUN_USERS") == "1":
+        try:
+            aid = await asyncio.to_thread(setup_users)
+            log.info("Лист «Пользователи» создан. Админ: %s", aid)
+        except Exception as e:
+            log.exception("Ошибка создания пользователей: %s", e)
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(rotation_reminders_job, CronTrigger(hour=9, minute=0))
