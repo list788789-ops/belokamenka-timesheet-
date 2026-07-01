@@ -96,6 +96,7 @@ def _main_menu():
     kb.row(CallbackButton(text="📅 Табель за сегодня", payload="menu:today"))
     kb.row(CallbackButton(text="🚪 Оформить увольнение", payload="menu:fire"))
     kb.row(CallbackButton(text="📋 Список уволенных", payload="menu:fired"))
+    kb.row(CallbackButton(text="➕ Добавить сотрудника", payload="menu:addemp"))
     kb.row(CallbackButton(text="🧹 Очистить весь день (тест)", payload="menu:clearall"))
     return kb.as_markup()
 
@@ -168,6 +169,7 @@ def _new_session():
         "clear_e": {"page": 0},
         "fire": {"page": 0, "day": None, "name": None, "awaiting_day": False},
         "rotation": {"name": None, "active": False},
+        "addemp": {"awaiting": False},
     }
 
 
@@ -361,6 +363,23 @@ async def cb_morning_page(event: MessageCallback):
 
 @dp.message_callback(F.callback.payload.startswith("mday:"))
 async def cb_mark_day(event: MessageCallback):
+    name = event.callback.payload.split(":", 1)[1]
+    # Проверка конфликтов день/ночь
+    warn = await asyncio.to_thread(sheets.check_day_conflict, name)
+    if warn:
+        kb = InlineKeyboardBuilder()
+        kb.row(
+            CallbackButton(text="✅ Всё равно день", payload=f"fday:{name}"),
+            CallbackButton(text="✖ Отмена", payload=f"mpage:{_sess(event)['morning']['page']}"),
+        )
+        await _edit_or_send(event, f"⚠️ {warn}\nВсё равно поставить день?", kb.as_markup())
+        return
+    await asyncio.to_thread(sheets.mark_day, name)
+    await _send_morning_list(event.message, _sess(event)["morning"]["page"], edit_event=event)
+
+
+@dp.message_callback(F.callback.payload.startswith("fday:"))
+async def cb_force_day(event: MessageCallback):
     name = event.callback.payload.split(":", 1)[1]
     await asyncio.to_thread(sheets.mark_day, name)
     await _send_morning_list(event.message, _sess(event)["morning"]["page"], edit_event=event)
@@ -566,6 +585,22 @@ async def cb_evening_page(event: MessageCallback):
 @dp.message_callback(F.callback.payload.startswith("mnight:"))
 async def cb_mark_night(event: MessageCallback):
     name = event.callback.payload.split(":", 1)[1]
+    warn = await asyncio.to_thread(sheets.check_night_conflict, name)
+    if warn:
+        kb = InlineKeyboardBuilder()
+        kb.row(
+            CallbackButton(text="✅ Всё равно ночь", payload=f"fnight:{name}"),
+            CallbackButton(text="✖ Отмена", payload=f"epage:{_sess(event)['evening']['page']}"),
+        )
+        await _edit_or_send(event, f"⚠️ {warn}\nВсё равно поставить ночь?", kb.as_markup())
+        return
+    await asyncio.to_thread(sheets.mark_night, name)
+    await _send_evening_list(event.message, _sess(event)["evening"]["page"], edit_event=event)
+
+
+@dp.message_callback(F.callback.payload.startswith("fnight:"))
+async def cb_force_night(event: MessageCallback):
+    name = event.callback.payload.split(":", 1)[1]
     await asyncio.to_thread(sheets.mark_night, name)
     await _send_evening_list(event.message, _sess(event)["evening"]["page"], edit_event=event)
 
@@ -596,6 +631,35 @@ async def cb_menu_fired(event: MessageCallback):
     for f in fired:
         lines.append(f"  ⚫ {f['name']} — уволен {f['fired_date'] or '—'}")
     await event.message.answer("\n".join(lines))
+
+
+@dp.message_callback(F.callback.payload == "menu:addemp")
+async def cb_menu_addemp(event: MessageCallback):
+    if not await _is_foreman(event):
+        return
+    _sess(event)["addemp"]["awaiting"] = True
+    await event.message.answer(
+        "Введите ФИО нового сотрудника (Фамилия Имя Отчество):")
+
+
+@dp.message_created(F.message.body.text.regexp(r"^[А-ЯЁа-яё]+\s+[А-ЯЁа-яё]"))
+async def on_new_employee_name(event: MessageCreated):
+    """Приём ФИО нового сотрудника (текст с 2+ слов кириллицей)."""
+    s = _sess(event)
+    if not s["addemp"].get("awaiting"):
+        return
+    s["addemp"]["awaiting"] = False
+    name = " ".join(event.message.body.text.split())
+    exists = await asyncio.to_thread(sheets.employee_exists, name)
+    if exists:
+        await event.message.answer(f"⚠️ {name} уже есть в списке. Добавление отменено.")
+        return
+    await event.message.answer(f"Добавляю {name}… (это займёт несколько секунд)")
+    ok = await asyncio.to_thread(sheets.add_employee, name)
+    if ok:
+        await event.message.answer(f"✅ {name} добавлен в табель.")
+    else:
+        await event.message.answer("Не удалось добавить (возможно, уже существует).")
 
 
 @dp.message_callback(F.callback.payload == "menu:clearall")
