@@ -249,6 +249,25 @@ def _row_by_name(ws, name: str) -> int | None:
     return None
 
 
+def get_current_status(emp_index: int, date: datetime | None = None) -> str:
+    """
+    Возвращает текущее значение ячейки сотрудника за день.
+    Нужно для предупреждения о перезаписи.
+    """
+    date = date or datetime.now()
+    active = get_employees(date)
+    if emp_index >= len(active):
+        return ""
+    name = active[emp_index]
+    ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return ""
+    col = _day_column(date)
+    val = ws.cell(row, col).value
+    return (val or "").strip()
+
+
 def set_status(emp_index: int, code: str, date: datetime | None = None):
     """
     Ставит статус сотруднику за конкретный день.
@@ -298,3 +317,89 @@ def day_summary(date: datetime | None = None) -> dict:
         if val in (CODE_ABSENT, CODE_SICK, CODE_VACATION):
             absent.append((name, val))
     return {"counts": counts, "absent": absent, "total": len(active)}
+
+
+def fire_employee(name: str, fire_day: int, date: datetime | None = None) -> bool:
+    """
+    Помечает сотрудника уволенным в листе «Сотрудники»:
+    статус → 'уволен', дата увольнения → ДД.ММ.ГГГГ.
+    Строки в листах месяцев не трогает (история сохраняется).
+    """
+    date = date or datetime.now()
+    try:
+        ws = _open().worksheet(EMP_SHEET)
+    except Exception:
+        return False
+    grid = ws.get_all_values()
+    fire_date_str = f"{fire_day:02d}.{date.month:02d}.{date.year}"
+    for i, r in enumerate(grid):
+        if i == 0:
+            continue  # шапка
+        if len(r) >= 2 and r[1].strip() == name.strip():
+            row = i + 1
+            # C = статус, D = дата увольнения
+            ws.update_cell(row, 3, EMP_STATUS_FIRED)
+            ws.update_cell(row, 4, fire_date_str)
+            _status_cache["data"] = None  # сброс кэша
+            return True
+    return False
+
+
+def build_work_report(name: str, out_path: str, year: int = 2026) -> str | None:
+    """
+    Формирует Excel-график работы сотрудника за месяцы, где он работал
+    (есть непустые ячейки). Возвращает путь к файлу или None.
+    """
+    import openpyxl
+    from openpyxl.styles import Font, Alignment, Border, Side
+
+    sp = _open()
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    thin = Border(*[Side(style="thin")] * 4)
+    center = Alignment(horizontal="center", vertical="center")
+    bold = Font(bold=True)
+
+    any_data = False
+    for month_idx, month_name in enumerate(MONTHS_RU, 1):
+        try:
+            ws_src = sp.worksheet(month_name)
+        except Exception:
+            continue
+        grid = ws_src.get_all_values()
+        # ищем строку сотрудника
+        emp_row = None
+        for r in grid[FIRST_DATA_ROW - 1:]:
+            if len(r) >= NAME_COL and r[NAME_COL - 1].strip() == name.strip():
+                emp_row = r
+                break
+        if not emp_row:
+            continue
+        # значения дней (с FIRST_DAY_COL)
+        day_vals = emp_row[FIRST_DAY_COL - 1:]
+        if not any(v.strip() for v in day_vals):
+            continue  # месяц пустой — пропускаем
+
+        any_data = True
+        ws_out = wb.create_sheet(month_name)
+        ws_out["A1"] = f"{name} — {month_name} {year}"
+        ws_out["A1"].font = Font(bold=True, size=12)
+        ws_out["A2"] = "День"
+        ws_out["B2"] = "Статус"
+        ws_out["A2"].font = bold
+        ws_out["B2"].font = bold
+        ws_out["A2"].border = thin
+        ws_out["B2"].border = thin
+        for d, v in enumerate(day_vals, 1):
+            ws_out.cell(row=d + 2, column=1, value=d).border = thin
+            c = ws_out.cell(row=d + 2, column=2, value=v.strip())
+            c.border = thin
+            c.alignment = center
+        ws_out.column_dimensions["A"].width = 6
+        ws_out.column_dimensions["B"].width = 10
+
+    if not any_data:
+        return None
+    wb.save(out_path)
+    return out_path
