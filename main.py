@@ -112,8 +112,41 @@ async def cb_today(event: MessageCallback):
 _morning = {"page": 0, "reason_mode": False}
 
 
-async def _send_morning_list(target, page: int):
-    """Список неотмеченных днём (для тапа присутствующих)."""
+async def _edit_or_send(event_or_target, text, markup=None):
+    """
+    Пытается отредактировать сообщение (callback), иначе шлёт новое.
+    event_or_target — либо MessageCallback (есть .message + правка),
+    либо объект message (метод .answer).
+    """
+    attachments = [markup] if markup else None
+    # Попытка редактирования (для callback-событий)
+    msg = getattr(event_or_target, "message", event_or_target)
+    for method in ("edit", "edit_text", "edit_message"):
+        fn = getattr(msg, method, None)
+        if callable(fn):
+            try:
+                if attachments:
+                    await fn(text, attachments=attachments)
+                else:
+                    await fn(text)
+                return
+            except TypeError:
+                try:
+                    await fn(text)
+                    return
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    # Фолбэк — новое сообщение
+    if attachments:
+        await msg.answer(text, attachments=attachments)
+    else:
+        await msg.answer(text)
+
+
+async def _send_morning_list(target, page: int, edit_event=None):
+    """Список неотмеченных днём. Если edit_event задан — правит на месте."""
     unmarked = await asyncio.to_thread(sheets.get_unmarked_day)
     total = len(unmarked)
     start = page * PAGE_SIZE
@@ -132,7 +165,10 @@ async def _send_morning_list(target, page: int):
     kb.row(CallbackButton(text="🧹 Очистить сотрудника", payload="mclear"))
     kb.row(CallbackButton(text="✅ Отметил всех присутствующих", payload="mdone"))
     txt = f"☀️ Утро. Отметьте, кто на месте (осталось {total}):"
-    await target.answer(txt, attachments=[kb.as_markup()])
+    if edit_event is not None:
+        await _edit_or_send(edit_event, txt, kb.as_markup())
+    else:
+        await target.answer(txt, attachments=[kb.as_markup()])
 
 
 @dp.message_callback(F.callback.payload == "menu:morning")
@@ -201,22 +237,21 @@ async def cb_morning_clear_list(event: MessageCallback):
 async def cb_morning_clear_do(event: MessageCallback):
     name = event.callback.payload.split(":", 1)[1]
     await asyncio.to_thread(sheets.clear_day_slot, name)
-    await event.message.answer(f"🧹 {name} — дневной слот очищен.")
-    await _send_morning_list(event.message, _morning["page"])
+    await _send_morning_list(event.message, _morning["page"], edit_event=event)
 
 
 @dp.message_callback(F.callback.payload.startswith("mpage:"))
 async def cb_morning_page(event: MessageCallback):
     page = int(event.callback.payload.split(":")[1])
     _morning["page"] = page
-    await _send_morning_list(event.message, page)
+    await _send_morning_list(event.message, page, edit_event=event)
 
 
 @dp.message_callback(F.callback.payload.startswith("mday:"))
 async def cb_mark_day(event: MessageCallback):
     name = event.callback.payload.split(":", 1)[1]
     await asyncio.to_thread(sheets.mark_day, name)
-    await _send_morning_list(event.message, _morning["page"])
+    await _send_morning_list(event.message, _morning["page"], edit_event=event)
 
 
 @dp.message_callback(F.callback.payload == "mdone")
@@ -230,19 +265,25 @@ async def cb_morning_done(event: MessageCallback):
     await _send_reason_list(event.message)
 
 
-async def _send_reason_list(target):
+async def _send_reason_list(target, edit_event=None):
     """Оставшиеся без отметки → выбор причины."""
     remaining = await asyncio.to_thread(sheets.get_unmarked_day)
     if not remaining:
-        await target.answer("Причины проставлены всем. Утро завершено.")
+        txt = "Причины проставлены всем. Утро завершено."
+        if edit_event is not None:
+            await _edit_or_send(edit_event, txt)
+        else:
+            await target.answer(txt)
         return
     kb = InlineKeyboardBuilder()
     for name in remaining[:PAGE_SIZE]:
         kb.row(CallbackButton(text=name, payload=f"rsn:{name}"))
-    await target.answer(
-        f"Укажите причину отсутствия (осталось {len(remaining)}). "
-        f"Нажмите на сотрудника:",
-        attachments=[kb.as_markup()])
+    txt = (f"Укажите причину отсутствия (осталось {len(remaining)}). "
+           f"Нажмите на сотрудника:")
+    if edit_event is not None:
+        await _edit_or_send(edit_event, txt, kb.as_markup())
+    else:
+        await target.answer(txt, attachments=[kb.as_markup()])
 
 
 @dp.message_callback(F.callback.payload.startswith("rsn:"))
@@ -257,7 +298,7 @@ async def cb_pick_reason(event: MessageCallback):
         CallbackButton(text="✈️ Межвахта", payload=f"setrsn:{name}:{sheets.DN_ROTATION}"),
         CallbackButton(text="📋 Мигр.учёт", payload=f"setrsn:{name}:{sheets.DN_MIGR}"),
     )
-    await event.message.answer(f"{name} — причина?", attachments=[kb.as_markup()])
+    await _edit_or_send(event, f"{name} — причина?", kb.as_markup())
 
 
 @dp.message_callback(F.callback.payload.startswith("setrsn:"))
@@ -268,19 +309,19 @@ async def cb_set_reason(event: MessageCallback):
         _rotation_wait["name"] = name
         _rotation_wait["active"] = True
         await asyncio.to_thread(sheets.set_reason, name, code)
-        await event.message.answer(
+        await _edit_or_send(
+            event,
             f"{name}: межвахта. До какого числа? Введите дату возврата (ДД.ММ):")
         return
     await asyncio.to_thread(sheets.set_reason, name, code)
-    await event.message.answer(f"✔ {name} — {code}")
-    await _send_reason_list(event.message)
+    await _send_reason_list(event.message, edit_event=event)
 
 
 # ================= ВЕЧЕР =================
 _evening = {"page": 0}
 
 
-async def _send_evening_list(target, page: int):
+async def _send_evening_list(target, page: int, edit_event=None):
     """Список тех, кто НЕ работал днём — их можно в ночь."""
     candidates = await asyncio.to_thread(sheets.get_not_worked_day)
     total = len(candidates)
@@ -299,9 +340,11 @@ async def _send_evening_list(target, page: int):
         kb.row(*nav)
     kb.row(CallbackButton(text="🧹 Очистить сотрудника", payload="eclear"))
     kb.row(CallbackButton(text="✅ Готово", payload="edone"))
-    await target.answer(
-        f"🌙 Вечер. Кто заступает в ночь? (доступно {total})",
-        attachments=[kb.as_markup()])
+    txt = f"🌙 Вечер. Кто заступает в ночь? (доступно {total})"
+    if edit_event is not None:
+        await _edit_or_send(edit_event, txt, kb.as_markup())
+    else:
+        await target.answer(txt, attachments=[kb.as_markup()])
 
 
 @dp.message_callback(F.callback.payload == "eclear")
@@ -315,16 +358,14 @@ async def cb_evening_clear_list(event: MessageCallback):
     for name in marked[:PAGE_SIZE]:
         kb.row(CallbackButton(text=name, payload=f"eclr:{name}"))
     kb.row(CallbackButton(text="◀ К отметке", payload="epage:0"))
-    await event.message.answer("Кого очистить (ночной слот)?",
-                               attachments=[kb.as_markup()])
+    await _edit_or_send(event, "Кого очистить (ночной слот)?", kb.as_markup())
 
 
 @dp.message_callback(F.callback.payload.startswith("eclr:"))
 async def cb_evening_clear_do(event: MessageCallback):
     name = event.callback.payload.split(":", 1)[1]
     await asyncio.to_thread(sheets.clear_night_slot, name)
-    await event.message.answer(f"🧹 {name} — ночной слот очищен.")
-    await _send_evening_list(event.message, _evening["page"])
+    await _send_evening_list(event.message, _evening["page"], edit_event=event)
 
 
 @dp.message_callback(F.callback.payload == "menu:evening")
@@ -339,14 +380,14 @@ async def cb_menu_evening(event: MessageCallback):
 async def cb_evening_page(event: MessageCallback):
     page = int(event.callback.payload.split(":")[1])
     _evening["page"] = page
-    await _send_evening_list(event.message, page)
+    await _send_evening_list(event.message, page, edit_event=event)
 
 
 @dp.message_callback(F.callback.payload.startswith("mnight:"))
 async def cb_mark_night(event: MessageCallback):
     name = event.callback.payload.split(":", 1)[1]
     await asyncio.to_thread(sheets.mark_night, name)
-    await _send_evening_list(event.message, _evening["page"])
+    await _send_evening_list(event.message, _evening["page"], edit_event=event)
 
 
 @dp.message_callback(F.callback.payload == "edone")
