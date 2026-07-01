@@ -1,710 +1,728 @@
 """
-Главный модуль: MAX-бот табеля (модель ДЕНЬ/НОЧЬ).
+Работа с Google Sheets для табеля учёта рабочего времени.
 
 Логика:
-  Утро (кнопка ☀️): бот сам ставит отдых тем, кто с ночи; прораб тапает
-    присутствующих (ДЕНЬ=Д); оставшимся указывает причину (Н/Б/МЖ).
-  Вечер (кнопка 🌙): прораб отмечает заступающих в ночь (НОЧЬ=НЧ).
-  Межвахта (МЖ): запрос даты возврата; ежедневное напоминание в 09:00
-    за 3 дня до возврата.
-
-Запуск:  python main.py
+  - 08:00 — заполнить все ячейки текущего дня кодом "Я" (явка)
+  - в течение дня — бригадир меняет ячейки через выпадающий список
+  - 20:00 — если за день НИ ОДНА ячейка не изменилась (у всех осталось "Я"),
+            отправить вопрос; при отсутствии подтверждения — обнулить день.
 """
 
-import asyncio
-import logging
+import calendar
+import json
 import os
+import time
 from datetime import datetime
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+import gspread
+from google.oauth2.service_account import Credentials
 
-import sheets
-from setup_dropdowns import setup_dropdowns
-from reorganize import reorganize
-from employees_sheet import create_employees_sheet
-from rebuild_daynight import rebuild_daynight
-from refresh_validation import refresh_validation
+# --- Настройки ---
+SPREADSHEET_ID = "1d7YqIAqWL9_cQQ7JpxqD_qV69q1NpVO3u58BzDlK73M"
 
-from maxapi import Bot, Dispatcher, F
-from maxapi.types import MessageCreated, BotStarted, Command, MessageCallback, CallbackButton
-from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
+# JSON-ключ service account.
+# На Railway кладётся в переменную окружения GOOGLE_CREDENTIALS (весь JSON).
+# Локально можно положить файл service_account.json рядом с кодом.
+CREDENTIALS_FILE = "service_account.json"
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s — %(levelname)s — %(message)s")
-log = logging.getLogger("timesheet")
+# Коды статусов (СТАРАЯ модель — пока оставлены для совместимости этапа перехода)
+CODE_PRESENT = "Я"   # явка
+CODE_ABSENT = "Н"    # неявка
+CODE_SICK = "Б"      # больничный
+CODE_VACATION = "О"  # отпуск
+CODE_WEEKEND = "В"   # выходной
+ALL_CODES = [CODE_PRESENT, CODE_ABSENT, CODE_SICK, CODE_VACATION, CODE_WEEKEND]
 
-MAX_BOT_TOKEN = os.getenv("MAX_BOT_TOKEN")
-FOREMAN_CHAT_ID = int(os.getenv("FOREMAN_CHAT_ID", "0"))
-TIMEZONE = os.getenv("TZ", "Europe/Moscow")
+# --- НОВАЯ модель ДЕНЬ/НОЧЬ ---
+# Дневной слот
+DN_DAY = "Д"       # работал день
+DN_REST = "О"      # отдых
+DN_SICK = "Б"      # больничный
+DN_ROTATION = "МЖ" # межвахта
+DN_ABSENT = "Н"    # неявка
+DN_MIGR = "МУ"     # миграционный учёт
+# Ночной слот
+DN_NIGHT = "НЧ"    # работал ночь
 
-bot = Bot(MAX_BOT_TOKEN)
-dp = Dispatcher()
+DAY_CODES = [DN_DAY, DN_REST, DN_SICK, DN_ROTATION, DN_ABSENT, DN_MIGR]
+NIGHT_CODES = [DN_NIGHT, DN_REST]
+# Причины отсутствия (для шага «оставшиеся»)
+REASON_CODES = [DN_ABSENT, DN_SICK, DN_ROTATION, DN_MIGR]
 
-PAGE_SIZE = 10
-_MONTHS_GEN = [
-    "января", "февраля", "марта", "апреля", "мая", "июня",
-    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+# Русские названия месяцев = названия листов
+MONTHS_RU = [
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
 ]
 
+# Структура листа (модель ДЕНЬ/НОЧЬ):
+#   строка 1 — заголовок месяца
+#   строка 2 — числа дней (объединены над парой Д|Н)
+#   строка 3 — подписи слотов: Д | Н | Д | Н ...
+#   строки 4+ — сотрудники: A=№, B=ФИО, далее пары день/ночь
+FIRST_DATA_ROW = 4
+NUM_COL = 1           # столбец A = №
+NAME_COL = 2          # столбец B = ФИО
+FIRST_DAY_COL = 3     # столбец C = день 1 (дневной слот)
 
-def _day_label(day: int) -> str:
-    return f"{day} {_MONTHS_GEN[datetime.now().month - 1]}"
+# Лист-справочник сотрудников
+EMP_SHEET = "Сотрудники"
+EMP_STATUS_ACTIVE = "активен"
+EMP_STATUS_FIRED = "уволен"
 
-
-def _is_foreman(event) -> bool:
-    if not FOREMAN_CHAT_ID:
-        return True
-    try:
-        return event.message.recipient.chat_id == FOREMAN_CHAT_ID
-    except Exception:
-        return True
-
-
-# ================= МЕНЮ =================
-
-def _main_menu():
-    kb = InlineKeyboardBuilder()
-    kb.row(CallbackButton(text="☀️ Утро (присутствующие)", payload="menu:morning"))
-    kb.row(CallbackButton(text="🌙 Вечер (ночная смена)", payload="menu:evening"))
-    kb.row(CallbackButton(text="📅 Табель за сегодня", payload="menu:today"))
-    kb.row(CallbackButton(text="🚪 Оформить увольнение", payload="menu:fire"))
-    kb.row(CallbackButton(text="📋 Список уволенных", payload="menu:fired"))
-    kb.row(CallbackButton(text="🧹 Очистить весь день (тест)", payload="menu:clearall"))
-    return kb.as_markup()
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
-@dp.bot_started()
-async def on_bot_started(event: BotStarted):
-    await bot.send_message(chat_id=event.chat_id,
-                           text="Бот табеля. Выберите действие:",
-                           attachments=[_main_menu()])
+def _credentials():
+    """
+    Загружает Credentials.
+    Приоритет: переменная окружения GOOGLE_CREDENTIALS (для Railway),
+    иначе — локальный файл service_account.json.
+    """
+    raw = os.getenv("GOOGLE_CREDENTIALS")
+    if raw:
+        info = json.loads(raw)
+        return Credentials.from_service_account_info(info, scopes=SCOPES)
+    return Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
 
 
-@dp.message_created(Command("menu"))
-async def show_menu(event: MessageCreated):
-    await event.message.answer("Выберите действие:", attachments=[_main_menu()])
+_cached_client = None
+_cached_spreadsheet = None
 
 
-@dp.message_created(Command("chatid"))
-async def show_chat_id(event: MessageCreated):
-    await event.message.answer(f"chat_id этого чата: {event.message.recipient.chat_id}")
+def _client():
+    global _cached_client
+    if _cached_client is None:
+        _cached_client = gspread.authorize(_credentials())
+    return _cached_client
 
 
-# ================= ТАБЕЛЬ ЗА СЕГОДНЯ =================
-
-@dp.message_callback(F.callback.payload == "menu:today")
-async def cb_today(event: MessageCallback):
-    s = await asyncio.to_thread(sheets.day_summary)
-    lines = [
-        f"Табель за {_day_label(datetime.now().day)}:",
-        f"☀️ День: {s['day']}   🌙 Ночь: {s['night']}   😴 Отдых: {s['rest']}",
-        f"🤒 Больн.: {s['sick']}   ✈️ Межвахта: {s['rotation']}   ❌ Неявка: {s['absent']}",
-    ]
-    if s["absent_list"]:
-        lines.append("\nОтсутствуют/особое:")
-        for name, code in s["absent_list"]:
-            lines.append(f"  • {name} — {code}")
-    await event.message.answer("\n".join(lines))
+def _open():
+    global _cached_spreadsheet
+    if _cached_spreadsheet is None:
+        _cached_spreadsheet = _client().open_by_key(SPREADSHEET_ID)
+    return _cached_spreadsheet
 
 
-# ================= УТРО =================
-# Сессия утренней отметки
-_morning = {"page": 0, "reason_mode": False}
-_clear_m = {"page": 0}
-_clear_e = {"page": 0}
+_ws_cache = {}
 
 
-async def _edit_or_send(event_or_target, text, markup=None):
-    """Редактирует сообщение (метод edit), при неудаче шлёт новое."""
-    attachments = [markup] if markup else None
-    msg = getattr(event_or_target, "message", event_or_target)
-
-    candidates = []
-    for obj in (event_or_target, msg):
-        fn = getattr(obj, "edit", None)
-        if callable(fn):
-            candidates.append((obj, fn))
-
-    for obj, fn in candidates:
-        try:
-            if attachments:
-                await fn(text, attachments=attachments)
-            else:
-                await fn(text)
-            return
-        except Exception as e:
-            log.warning("edit failed: %s", e)
-
-    if attachments:
-        await msg.answer(text, attachments=attachments)
-    else:
-        await msg.answer(text)
+def _worksheet_for(date: datetime):
+    """Лист месяца (кэшируется по названию, чтобы не читать метаданные книги)."""
+    title = MONTHS_RU[date.month - 1]
+    if title not in _ws_cache:
+        _ws_cache[title] = _open().worksheet(title)
+    return _ws_cache[title]
 
 
-async def _send_morning_list(target, page: int, edit_event=None):
-    """Список неотмеченных днём. Если edit_event задан — правит на месте."""
-    unmarked = await asyncio.to_thread(sheets.get_unmarked_day)
-    total = len(unmarked)
-    start = page * PAGE_SIZE
-    chunk = unmarked[start:start + PAGE_SIZE]
-
-    kb = InlineKeyboardBuilder()
-    for name in chunk:
-        kb.row(CallbackButton(text=name, payload=f"mday:{name}"))
-    nav = []
-    if start + PAGE_SIZE < total:
-        nav.append(CallbackButton(text="Ещё ▼", payload=f"mpage:{page + 1}"))
-    if page > 0:
-        nav.append(CallbackButton(text="▲ Назад", payload=f"mpage:{page - 1}"))
-    if nav:
-        kb.row(*nav)
-    kb.row(CallbackButton(text="🧹 Очистить сотрудника", payload="mclear"))
-    kb.row(CallbackButton(text="✅ Отметил всех присутствующих", payload="mdone"))
-    txt = f"☀️ Утро. Отметьте, кто на месте (осталось {total}):"
-    if edit_event is not None:
-        await _edit_or_send(edit_event, txt, kb.as_markup())
-    else:
-        await target.answer(txt, attachments=[kb.as_markup()])
+def _day_col(date: datetime) -> int:
+    """Столбец ДНЕВНОГО слота для числа (1-based). Пары: С=1Д, D=1Н, E=2Д..."""
+    return FIRST_DAY_COL + (date.day - 1) * 2
 
 
-@dp.message_callback(F.callback.payload == "menu:morning")
-async def cb_menu_morning(event: MessageCallback):
-    if not _is_foreman(event):
+def _night_col(date: datetime) -> int:
+    """Столбец НОЧНОГО слота для числа (1-based)."""
+    return _day_col(date) + 1
+
+
+# Совместимость со старым именем (если где-то ещё вызывается)
+def _day_column(date: datetime) -> int:
+    return _day_col(date)
+
+
+def _employee_count(ws) -> int:
+    """Сколько строк-сотрудников на листе."""
+    names = ws.col_values(NAME_COL)  # включая шапку
+    # names[0]=заголовок месяца (стр.1), names[1]=шапка (стр.2), дальше ФИО
+    return max(0, len(names) - (FIRST_DATA_ROW - 1))
+
+
+_grid_cache = {"data": None, "ts": 0, "sheet": None}
+_GRID_TTL = 15  # секунд
+
+
+def _read_grid(date: datetime | None = None):
+    """
+    Читает весь лист месяца (кэш 15 сек). Возвращает (ws, grid).
+    При отметках кэш обновляется локально через _grid_set.
+    """
+    date = date or datetime.now()
+    ws = _worksheet_for(date)
+    now = time.time()
+    if (_grid_cache["sheet"] != ws.title
+            or now - _grid_cache["ts"] > _GRID_TTL
+            or _grid_cache["data"] is None):
+        _grid_cache["data"] = ws.get_all_values()
+        _grid_cache["ts"] = now
+        _grid_cache["sheet"] = ws.title
+    return ws, _grid_cache["data"]
+
+
+def _grid_set(ws, row: int, col: int, value: str):
+    """Локально обновляет кэш grid после записи ячейки (row/col 1-based)."""
+    if _grid_cache["sheet"] != ws.title or _grid_cache["data"] is None:
         return
-    _morning["page"] = 0
-    _morning["reason_mode"] = False
-
-    # Проверка прерванной отметки
-    prog = await asyncio.to_thread(sheets.morning_progress)
-    if prog["interrupted"]:
-        kb = InlineKeyboardBuilder()
-        kb.row(
-            CallbackButton(text="▶️ Продолжить", payload="mcontinue"),
-            CallbackButton(text="🔄 Начать заново", payload="mrestart"),
-        )
-        await event.message.answer(
-            f"Отметка за сегодня не завершена: отмечено {prog['marked']}, "
-            f"осталось {prog['unmarked']}. Продолжить?",
-            attachments=[kb.as_markup()])
-        return
-
-    await _morning_start(event.message)
+    grid = _grid_cache["data"]
+    ri, ci = row - 1, col - 1
+    while len(grid) <= ri:
+        grid.append([])
+    while len(grid[ri]) <= ci:
+        grid[ri].append("")
+    grid[ri][ci] = value
 
 
-async def _morning_start(target):
-    """Начало утренней отметки: автоотдых с ночи + список."""
-    rest_names = await asyncio.to_thread(sheets.get_night_rest)
-    for nm in rest_names:
-        await asyncio.to_thread(sheets.set_rest, nm)
-    if rest_names:
-        await target.answer("С ночи отдыхают (проставлен отдых):\n" +
-                            "\n".join(f"  😴 {n}" for n in rest_names))
-    await _send_morning_list(target, 0)
+def mark_day(name: str, date: datetime | None = None) -> bool:
+    """Прораб отметил присутствующего днём: ДЕНЬ=Д."""
+    date = date or datetime.now()
+    ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return False
+    col = _day_col(date)
+    ws.update_cell(row, col, DN_DAY)
+    _grid_set(ws, row, col, DN_DAY)
+    return True
 
 
-@dp.message_callback(F.callback.payload == "mcontinue")
-async def cb_morning_continue(event: MessageCallback):
-    _morning["page"] = 0
-    await _send_morning_list(event.message, 0)
+def mark_night(name: str, date: datetime | None = None) -> bool:
+    """Прораб отметил ночную смену: НОЧЬ=НЧ, ДЕНЬ=О (днём отдыхал)."""
+    date = date or datetime.now()
+    ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return False
+    dcol, ncol = _day_col(date), _night_col(date)
+    ws.update_cell(row, dcol, DN_REST)
+    ws.update_cell(row, ncol, DN_NIGHT)
+    _grid_set(ws, row, dcol, DN_REST)
+    _grid_set(ws, row, ncol, DN_NIGHT)
+    return True
 
 
-@dp.message_callback(F.callback.payload == "mrestart")
-async def cb_morning_restart(event: MessageCallback):
-    _morning["page"] = 0
-    await _morning_start(event.message)
+def set_reason(name: str, code: str, date: datetime | None = None) -> bool:
+    """Причина отсутствия в дневной слот: Н / Б / МЖ."""
+    date = date or datetime.now()
+    ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return False
+    col = _day_col(date)
+    ws.update_cell(row, col, code)
+    _grid_set(ws, row, col, code)
+    return True
 
 
-@dp.message_callback(F.callback.payload == "mclear")
-async def cb_morning_clear_list(event: MessageCallback):
-    _clear_m["page"] = 0
-    await _send_morning_clear_list(event, 0)
+def set_rest(name: str, date: datetime | None = None) -> bool:
+    """Автоотдых с ночи: ДЕНЬ=О."""
+    date = date or datetime.now()
+    ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return False
+    col = _day_col(date)
+    ws.update_cell(row, col, DN_REST)
+    _grid_set(ws, row, col, DN_REST)
+    return True
 
 
-async def _send_morning_clear_list(event, page: int):
-    marked = await asyncio.to_thread(sheets.get_marked_day)
-    if not marked:
-        await _edit_or_send(event, "Пока некого очищать.")
-        return
-    total = len(marked)
-    start = page * PAGE_SIZE
-    chunk = marked[start:start + PAGE_SIZE]
-    kb = InlineKeyboardBuilder()
-    for name in chunk:
-        kb.row(CallbackButton(text=name, payload=f"mclr:{name}"))
-    nav = []
-    if start + PAGE_SIZE < total:
-        nav.append(CallbackButton(text="Ещё ▼", payload=f"mclrpage:{page + 1}"))
-    if page > 0:
-        nav.append(CallbackButton(text="▲ Назад", payload=f"mclrpage:{page - 1}"))
-    if nav:
-        kb.row(*nav)
-    kb.row(CallbackButton(text="◀ К отметке", payload="mpage:0"))
-    await _edit_or_send(event, f"Кого очистить (дневной слот)? Всего: {total}",
-                        kb.as_markup())
+def clear_day_slot(name: str, date: datetime | None = None) -> bool:
+    """Очистка дневного слота сотрудника (Д→пусто). Ночной не трогаем."""
+    date = date or datetime.now()
+    ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return False
+    col = _day_col(date)
+    ws.update_cell(row, col, "")
+    _grid_set(ws, row, col, "")
+    return True
 
 
-@dp.message_callback(F.callback.payload.startswith("mclrpage:"))
-async def cb_morning_clear_page(event: MessageCallback):
-    page = int(event.callback.payload.split(":")[1])
-    _clear_m["page"] = page
-    await _send_morning_clear_list(event, page)
+def clear_night_slot(name: str, date: datetime | None = None) -> bool:
+    """Очистка ночного слота сотрудника (Н→пусто). Дневной не трогаем."""
+    date = date or datetime.now()
+    ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return False
+    col = _night_col(date)
+    ws.update_cell(row, col, "")
+    _grid_set(ws, row, col, "")
+    return True
 
 
-@dp.message_callback(F.callback.payload.startswith("mclr:"))
-async def cb_morning_clear_do(event: MessageCallback):
-    name = event.callback.payload.split(":", 1)[1]
-    await asyncio.to_thread(sheets.clear_day_slot, name)
-    await _send_morning_clear_list(event, _clear_m["page"])
+def get_marked_day(date: datetime | None = None) -> list[str]:
+    """Активные, у кого дневной слот НЕ пуст (для очистки в «Утро»)."""
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    col_idx = _day_col(date) - 1
+    active = get_employees(date)
+    val = {}
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) > NAME_COL - 1:
+            nm = r[NAME_COL - 1].strip()
+            val[nm] = r[col_idx].strip() if len(r) > col_idx else ""
+    return [n for n in active if val.get(n, "")]
 
 
-@dp.message_callback(F.callback.payload.startswith("mpage:"))
-async def cb_morning_page(event: MessageCallback):
-    page = int(event.callback.payload.split(":")[1])
-    _morning["page"] = page
-    await _send_morning_list(event.message, page, edit_event=event)
+def get_marked_night(date: datetime | None = None) -> list[str]:
+    """Активные, у кого ночной слот = НЧ (для очистки в «Вечер»)."""
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    col_idx = _night_col(date) - 1
+    active = get_employees(date)
+    val = {}
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) > NAME_COL - 1:
+            nm = r[NAME_COL - 1].strip()
+            val[nm] = r[col_idx].strip() if len(r) > col_idx else ""
+    return [n for n in active if val.get(n, "") == DN_NIGHT]
 
 
-@dp.message_callback(F.callback.payload.startswith("mday:"))
-async def cb_mark_day(event: MessageCallback):
-    name = event.callback.payload.split(":", 1)[1]
-    await asyncio.to_thread(sheets.mark_day, name)
-    await _send_morning_list(event.message, _morning["page"], edit_event=event)
-
-
-@dp.message_callback(F.callback.payload == "mdone")
-async def cb_morning_done(event: MessageCallback):
-    """Присутствующие отмечены — переходим к причинам для оставшихся."""
-    remaining = await asyncio.to_thread(sheets.get_unmarked_day)
-    if not remaining:
-        await event.message.answer("Все отмечены. Утро завершено.")
-        return
-    _morning["reason_mode"] = True
-    await _send_reason_list(event.message)
-
-
-async def _send_reason_list(target, edit_event=None, page: int = 0):
-    """Оставшиеся без отметки → выбор причины (с пагинацией и «Завершить»)."""
-    remaining = await asyncio.to_thread(sheets.get_unmarked_day)
-    if not remaining:
-        txt = "Причины проставлены всем. Утро завершено."
-        if edit_event is not None:
-            await _edit_or_send(edit_event, txt)
+def morning_progress(date: datetime | None = None) -> dict:
+    """
+    Состояние утренней отметки:
+      marked  — сколько с непустым дневным слотом
+      unmarked — сколько с пустым
+    Прерванная отметка = marked > 0 И unmarked > 0.
+    """
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    col_idx = _day_col(date) - 1
+    active = set(get_employees(date))
+    marked = unmarked = 0
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) <= NAME_COL - 1:
+            continue
+        nm = r[NAME_COL - 1].strip()
+        if nm not in active:
+            continue
+        v = r[col_idx].strip() if len(r) > col_idx else ""
+        if v:
+            marked += 1
         else:
-            await target.answer(txt)
-        return
-    total = len(remaining)
-    start = page * PAGE_SIZE
-    chunk = remaining[start:start + PAGE_SIZE]
-    kb = InlineKeyboardBuilder()
-    for name in chunk:
-        kb.row(CallbackButton(text=name, payload=f"rsn:{name}"))
-    nav = []
-    if start + PAGE_SIZE < total:
-        nav.append(CallbackButton(text="Ещё ▼", payload=f"rsnpage:{page + 1}"))
-    if page > 0:
-        nav.append(CallbackButton(text="▲ Назад", payload=f"rsnpage:{page - 1}"))
-    if nav:
-        kb.row(*nav)
-    kb.row(CallbackButton(text="✅ Завершить (остальным неявка)", payload="rsnfinish"))
-    txt = (f"Укажите причину отсутствия (осталось {total}). "
-           f"Нажмите на сотрудника, либо «Завершить»:")
-    if edit_event is not None:
-        await _edit_or_send(edit_event, txt, kb.as_markup())
-    else:
-        await target.answer(txt, attachments=[kb.as_markup()])
-
-
-@dp.message_callback(F.callback.payload.startswith("rsnpage:"))
-async def cb_reason_page(event: MessageCallback):
-    page = int(event.callback.payload.split(":")[1])
-    await _send_reason_list(event.message, edit_event=event, page=page)
-
-
-@dp.message_callback(F.callback.payload == "rsnfinish")
-async def cb_reason_finish(event: MessageCallback):
-    remaining = await asyncio.to_thread(sheets.get_unmarked_day)
-    if not remaining:
-        await _edit_or_send(event, "Все размечены. Утро завершено.")
-        return
-    kb = InlineKeyboardBuilder()
-    kb.row(
-        CallbackButton(text="✅ Да, неявка", payload="rsnfinish_yes"),
-        CallbackButton(text="✖ Отмена", payload="rsnfinish_no"),
-    )
-    await _edit_or_send(
-        event,
-        f"Всем непроставленным ({len(remaining)} чел.) будет проставлена "
-        f"неявка (Н). Продолжить?",
-        kb.as_markup())
-
-
-@dp.message_callback(F.callback.payload == "rsnfinish_yes")
-async def cb_reason_finish_yes(event: MessageCallback):
-    n = await asyncio.to_thread(sheets.fill_unmarked_absent)
-    await _edit_or_send(event, f"Утро завершено. Неявка проставлена: {n} чел.")
-
-
-@dp.message_callback(F.callback.payload == "rsnfinish_no")
-async def cb_reason_finish_no(event: MessageCallback):
-    await _send_reason_list(event.message, edit_event=event)
-
-
-@dp.message_callback(F.callback.payload.startswith("rsn:"))
-async def cb_pick_reason(event: MessageCallback):
-    name = event.callback.payload.split(":", 1)[1]
-    kb = InlineKeyboardBuilder()
-    kb.row(
-        CallbackButton(text="❌ Неявка", payload=f"setrsn:{name}:{sheets.DN_ABSENT}"),
-        CallbackButton(text="🤒 Больничный", payload=f"setrsn:{name}:{sheets.DN_SICK}"),
-    )
-    kb.row(
-        CallbackButton(text="✈️ Межвахта", payload=f"setrsn:{name}:{sheets.DN_ROTATION}"),
-        CallbackButton(text="📋 Мигр.учёт", payload=f"setrsn:{name}:{sheets.DN_MIGR}"),
-    )
-    await _edit_or_send(event, f"{name} — причина?", kb.as_markup())
-
-
-@dp.message_callback(F.callback.payload.startswith("setrsn:"))
-async def cb_set_reason(event: MessageCallback):
-    _, name, code = event.callback.payload.split(":", 2)
-    if code == sheets.DN_ROTATION:
-        # межвахта → спрашиваем дату возврата
-        _rotation_wait["name"] = name
-        _rotation_wait["active"] = True
-        await asyncio.to_thread(sheets.set_reason, name, code)
-        await _edit_or_send(
-            event,
-            f"{name}: межвахта. До какого числа? Введите дату возврата (ДД.ММ):")
-        return
-    await asyncio.to_thread(sheets.set_reason, name, code)
-    await _send_reason_list(event.message, edit_event=event)
-
-
-# ================= ВЕЧЕР =================
-_evening = {"page": 0}
-
-
-async def _send_evening_list(target, page: int, edit_event=None):
-    """Список тех, кто НЕ работал днём — их можно в ночь."""
-    candidates = await asyncio.to_thread(sheets.get_not_worked_day)
-    total = len(candidates)
-    start = page * PAGE_SIZE
-    chunk = candidates[start:start + PAGE_SIZE]
-
-    kb = InlineKeyboardBuilder()
-    for name in chunk:
-        kb.row(CallbackButton(text=name, payload=f"mnight:{name}"))
-    nav = []
-    if start + PAGE_SIZE < total:
-        nav.append(CallbackButton(text="Ещё ▼", payload=f"epage:{page + 1}"))
-    if page > 0:
-        nav.append(CallbackButton(text="▲ Назад", payload=f"epage:{page - 1}"))
-    if nav:
-        kb.row(*nav)
-    kb.row(CallbackButton(text="🧹 Очистить сотрудника", payload="eclear"))
-    kb.row(CallbackButton(text="✅ Готово", payload="edone"))
-    txt = f"🌙 Вечер. Кто заступает в ночь? (доступно {total})"
-    if edit_event is not None:
-        await _edit_or_send(edit_event, txt, kb.as_markup())
-    else:
-        await target.answer(txt, attachments=[kb.as_markup()])
-
-
-@dp.message_callback(F.callback.payload == "eclear")
-async def cb_evening_clear_list(event: MessageCallback):
-    _clear_e["page"] = 0
-    await _send_evening_clear_list(event, 0)
-
-
-async def _send_evening_clear_list(event, page: int):
-    marked = await asyncio.to_thread(sheets.get_marked_night)
-    if not marked:
-        await _edit_or_send(event, "Пока некого очищать.")
-        return
-    total = len(marked)
-    start = page * PAGE_SIZE
-    chunk = marked[start:start + PAGE_SIZE]
-    kb = InlineKeyboardBuilder()
-    for name in chunk:
-        kb.row(CallbackButton(text=name, payload=f"eclr:{name}"))
-    nav = []
-    if start + PAGE_SIZE < total:
-        nav.append(CallbackButton(text="Ещё ▼", payload=f"eclrpage:{page + 1}"))
-    if page > 0:
-        nav.append(CallbackButton(text="▲ Назад", payload=f"eclrpage:{page - 1}"))
-    if nav:
-        kb.row(*nav)
-    kb.row(CallbackButton(text="◀ К отметке", payload="epage:0"))
-    await _edit_or_send(event, f"Кого очистить (ночной слот)? Всего: {total}",
-                        kb.as_markup())
-
-
-@dp.message_callback(F.callback.payload.startswith("eclrpage:"))
-async def cb_evening_clear_page(event: MessageCallback):
-    page = int(event.callback.payload.split(":")[1])
-    _clear_e["page"] = page
-    await _send_evening_clear_list(event, page)
-
-
-@dp.message_callback(F.callback.payload.startswith("eclr:"))
-async def cb_evening_clear_do(event: MessageCallback):
-    name = event.callback.payload.split(":", 1)[1]
-    await asyncio.to_thread(sheets.clear_night_slot, name)
-    await _send_evening_clear_list(event, _clear_e["page"])
-
-
-@dp.message_callback(F.callback.payload == "menu:evening")
-async def cb_menu_evening(event: MessageCallback):
-    if not _is_foreman(event):
-        return
-    _evening["page"] = 0
-    await _send_evening_list(event.message, 0)
-
-
-@dp.message_callback(F.callback.payload.startswith("epage:"))
-async def cb_evening_page(event: MessageCallback):
-    page = int(event.callback.payload.split(":")[1])
-    _evening["page"] = page
-    await _send_evening_list(event.message, page, edit_event=event)
-
-
-@dp.message_callback(F.callback.payload.startswith("mnight:"))
-async def cb_mark_night(event: MessageCallback):
-    name = event.callback.payload.split(":", 1)[1]
-    await asyncio.to_thread(sheets.mark_night, name)
-    await _send_evening_list(event.message, _evening["page"], edit_event=event)
-
-
-@dp.message_callback(F.callback.payload == "edone")
-async def cb_evening_done(event: MessageCallback):
-    await event.message.answer("🌙 Вечерняя отметка завершена.")
-
-
-# ================= УВОЛЬНЕНИЕ =================
-_fire_session = {"page": 0, "day": None, "name": None, "awaiting_day": False}
-
-
-@dp.message_callback(F.callback.payload == "menu:fire")
-async def cb_menu_fire(event: MessageCallback):
-    if not _is_foreman(event):
-        return
-    _fire_session.update({"page": 0, "day": None, "name": None, "awaiting_day": False})
-    await _send_fire_list(event.message, 0)
-
-
-@dp.message_callback(F.callback.payload == "menu:fired")
-async def cb_menu_fired(event: MessageCallback):
-    fired = await asyncio.to_thread(sheets.get_fired)
-    if not fired:
-        await event.message.answer("Уволенных нет.")
-        return
-    lines = ["Уволенные сотрудники:"]
-    for f in fired:
-        lines.append(f"  ⚫ {f['name']} — уволен {f['fired_date'] or '—'}")
-    await event.message.answer("\n".join(lines))
-
-
-@dp.message_callback(F.callback.payload == "menu:clearall")
-async def cb_menu_clearall(event: MessageCallback):
-    if not _is_foreman(event):
-        return
-    kb = InlineKeyboardBuilder()
-    kb.row(
-        CallbackButton(text="✅ Да, удалить всё", payload="clearall_yes"),
-        CallbackButton(text="✖ Отмена", payload="clearall_no"),
-    )
-    await event.message.answer(
-        "⚠️ ТЕСТ: удалить отметки (день И ночь) у ВСЕХ за сегодня?",
-        attachments=[kb.as_markup()])
-
-
-@dp.message_callback(F.callback.payload == "clearall_yes")
-async def cb_clearall_yes(event: MessageCallback):
-    n = await asyncio.to_thread(sheets.clear_all_day)
-    await _edit_or_send(event, f"🧹 Очищено за сегодня: {n} сотрудников (день+ночь).")
-
-
-@dp.message_callback(F.callback.payload == "clearall_no")
-async def cb_clearall_no(event: MessageCallback):
-    await _edit_or_send(event, "Отменено.")
-
-
-async def _send_fire_list(target, page: int):
-    employees = await asyncio.to_thread(sheets.get_employees)
-    total = len(employees)
-    start = page * PAGE_SIZE
-    chunk = employees[start:start + PAGE_SIZE]
-    kb = InlineKeyboardBuilder()
-    for i, name in enumerate(chunk, start=start):
-        kb.row(CallbackButton(text=f"{i + 1}. {name}", payload=f"fire:{i}"))
-    nav = []
-    if start + PAGE_SIZE < total:
-        nav.append(CallbackButton(text="Ещё ▼", payload=f"firepage:{page + 1}"))
-    if page > 0:
-        nav.append(CallbackButton(text="▲ Назад", payload=f"firepage:{page - 1}"))
-    if nav:
-        kb.row(*nav)
-    kb.row(CallbackButton(text="✖ Отмена", payload="firecancel"))
-    await target.answer("Кого увольняем?", attachments=[kb.as_markup()])
-
-
-@dp.message_callback(F.callback.payload.startswith("firepage:"))
-async def cb_fire_page(event: MessageCallback):
-    page = int(event.callback.payload.split(":")[1])
-    _fire_session["page"] = page
-    await _send_fire_list(event.message, page)
-
-
-@dp.message_callback(F.callback.payload.startswith("fire:"))
-async def cb_fire_pick(event: MessageCallback):
-    idx = int(event.callback.payload.split(":")[1])
-    employees = await asyncio.to_thread(sheets.get_employees)
-    if idx >= len(employees):
-        await event.message.answer("Сотрудник не найден.")
-        return
-    _fire_session["name"] = employees[idx]
-    _fire_session["awaiting_day"] = True
-    await event.message.answer(
-        f"Увольняем: {employees[idx]}\nВведите число месяца — дату увольнения:")
-
-
-@dp.message_callback(F.callback.payload == "fireconfirm")
-async def cb_fire_confirm(event: MessageCallback):
-    name = _fire_session["name"]
-    day = _fire_session["day"]
-    if not name or not day:
-        await event.message.answer("Данные увольнения потеряны, начните заново.")
-        return
-    ok = await asyncio.to_thread(sheets.fire_employee, name, day)
-    if not ok:
-        await event.message.answer("Не удалось обновить статус.")
-        return
-    await event.message.answer(f"⚫ {name} уволен с {day:02d}.{datetime.now().month:02d}.")
-
-    safe = "".join(ch for ch in name if ch.isalnum() or ch in " _-").strip().replace(" ", "_")
-    out_path = f"/tmp/Otchet_{safe}.xlsx"
-    path = await asyncio.to_thread(sheets.build_work_report, name, out_path)
-    if path:
-        await event.message.answer(
-            "График работы сформирован и готов к отправке бухгалтеру "
-            "(почта будет подключена позже).")
-    else:
-        await event.message.answer("График пуст — у сотрудника нет отметок.")
-
-
-@dp.message_callback(F.callback.payload == "firecancel")
-async def cb_fire_cancel(event: MessageCallback):
-    _fire_session.update({"name": None, "day": None, "awaiting_day": False})
-    await event.message.answer("Увольнение отменено.")
-
-
-# ================= ВВОД ЧИСЕЛ / ДАТ =================
-_rotation_wait = {"name": None, "active": False}
-
-
-@dp.message_created(F.message.body.text.regexp(r"^\d{1,2}\.\d{1,2}$"))
-async def on_date_ddmm(event: MessageCreated):
-    """Дата возврата с межвахты (ДД.ММ)."""
-    if not _rotation_wait.get("active"):
-        return
-    name = _rotation_wait["name"]
-    _rotation_wait["active"] = False
-    _rotation_wait["name"] = None
-    await asyncio.to_thread(sheets.set_rotation_return, name, event.message.body.text)
-    await event.message.answer(
-        f"✔ {name}: межвахта до {event.message.body.text}. "
-        f"Напомню за 3 дня до возврата.")
-    await _send_reason_list(event.message)
-
-
-@dp.message_created(F.message.body.text.regexp(r"^\d{1,2}$"))
-async def on_day_number(event: MessageCreated):
-    """Число — дата увольнения."""
-    day = int(event.message.body.text)
-    if _fire_session.get("awaiting_day"):
-        _fire_session["awaiting_day"] = False
-        _fire_session["day"] = day
-        name = _fire_session["name"]
-        kb = InlineKeyboardBuilder()
-        kb.row(
-            CallbackButton(text="✅ Уволить", payload="fireconfirm"),
-            CallbackButton(text="✖ Отмена", payload="firecancel"),
-        )
-        await event.message.answer(
-            f"Уволить {name} с {day:02d}.{datetime.now().month:02d}?\n"
-            f"Он исчезнет из списка отметок.",
-            attachments=[kb.as_markup()])
-
-
-# ================= НАПОМИНАНИЯ О МЕЖВАХТЕ (09:00) =================
-
-async def rotation_reminders_job():
+            unmarked += 1
+    return {"marked": marked, "unmarked": unmarked,
+            "interrupted": marked > 0 and unmarked > 0}
+
+
+def get_night_rest(date: datetime | None = None) -> list[str]:
+    """
+    Кто вчера работал в ночь (НОЧЬ=НЧ) — тем сегодня положен отдых днём.
+    Корректно смотрит в прошлый месяц при переходе через 1-е число.
+    """
+    date = date or datetime.now()
+    from datetime import timedelta
+    yday = date - timedelta(days=1)
     try:
-        reminders = await asyncio.to_thread(sheets.get_rotation_reminders, 3)
-    except Exception as e:
-        log.exception("Ошибка проверки межвахты: %s", e)
-        return
-    if not reminders and FOREMAN_CHAT_ID:
-        return
-    for r in reminders:
+        ws, grid = _read_grid(yday)
+    except Exception:
+        return []
+    night_idx = _night_col(yday) - 1  # 0-based
+    active = set(get_employees(date))
+    result = []
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) <= NAME_COL - 1:
+            continue
+        name = r[NAME_COL - 1].strip()
+        if name in active and len(r) > night_idx and r[night_idx].strip() == DN_NIGHT:
+            result.append(name)
+    return result
+
+
+def get_day_slot(name: str, date: datetime | None = None) -> str:
+    """Текущее значение дневного слота сотрудника."""
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    col_idx = _day_col(date) - 1
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) > NAME_COL - 1 and r[NAME_COL - 1].strip() == name.strip():
+            return r[col_idx].strip() if len(r) > col_idx else ""
+    return ""
+
+
+def get_unmarked_day(date: datetime | None = None) -> list[str]:
+    """Активные, у кого дневной слот ПУСТ (ещё не отмечены утром)."""
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    col_idx = _day_col(date) - 1
+    active = get_employees(date)
+    present = {}
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) > NAME_COL - 1:
+            nm = r[NAME_COL - 1].strip()
+            present[nm] = r[col_idx].strip() if len(r) > col_idx else ""
+    return [n for n in active if not present.get(n, "")]
+
+
+def clear_all_day(date: datetime | None = None) -> int:
+    """
+    ТЕСТОВАЯ: очищает ОБА слота (день+ночь) у всех активных за день.
+    Батч-запись. Возвращает число очищенных сотрудников.
+    """
+    date = date or datetime.now()
+    active = get_employees(date)
+    ws = _worksheet_for(date)
+    dcol, ncol = _day_col(date), _night_col(date)
+    cells = []
+    for name in active:
+        row = _row_by_name(ws, name)
+        if row:
+            cells.append(gspread.Cell(row, dcol, ""))
+            cells.append(gspread.Cell(row, ncol, ""))
+            _grid_set(ws, row, dcol, "")
+            _grid_set(ws, row, ncol, "")
+    if cells:
+        ws.update_cells(cells)
+    return len(active)
+
+
+def fill_unmarked_absent(date: datetime | None = None) -> int:
+    """
+    Всем активным с пустым дневным слотом ставит Н (неявка).
+    Батч-запись одним запросом. Возвращает число проставленных.
+    """
+    date = date or datetime.now()
+    unmarked = get_unmarked_day(date)
+    if not unmarked:
+        return 0
+    ws = _worksheet_for(date)
+    col = _day_col(date)
+    cells = []
+    for name in unmarked:
+        row = _row_by_name(ws, name)
+        if row:
+            cells.append(gspread.Cell(row, col, DN_ABSENT))
+            _grid_set(ws, row, col, DN_ABSENT)
+    if cells:
+        ws.update_cells(cells)
+    return len(cells)
+
+
+def get_not_worked_day(date: datetime | None = None) -> list[str]:
+    """
+    Для вечера: активные, кто НЕ работал днём (слот != Д).
+    Их можно поставить в ночь.
+    """
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    col_idx = _day_col(date) - 1
+    active = get_employees(date)
+    day_val = {}
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) > NAME_COL - 1:
+            nm = r[NAME_COL - 1].strip()
+            day_val[nm] = r[col_idx].strip() if len(r) > col_idx else ""
+    return [n for n in active if day_val.get(n, "") != DN_DAY]
+
+
+def _all_month_names(date: datetime | None = None) -> list[str]:
+    """Все ФИО из листа месяца (по порядку строк)."""
+    date = date or datetime.now()
+    ws = _worksheet_for(date)
+    names = ws.col_values(NAME_COL)
+    return names[FIRST_DATA_ROW - 1:]
+
+
+_status_cache = {"data": None, "ts": 0}
+_STATUS_TTL = 30  # секунд
+
+
+def get_status_list(force: bool = False) -> list[dict]:
+    """
+    Читает лист «Сотрудники» (с кэшем на 30 сек).
+    Возвращает список {"name", "status", "fired_date"} по порядку.
+    Если листа нет — пустой список.
+    """
+    now = time.time()
+    if not force and _status_cache["data"] is not None \
+            and now - _status_cache["ts"] < _STATUS_TTL:
+        return _status_cache["data"]
+    try:
+        ws = _open().worksheet(EMP_SHEET)
+    except Exception:
+        return []
+    rows = ws.get_all_values()[1:]  # без шапки
+    result = []
+    for r in rows:
+        if len(r) >= 2 and r[1].strip():
+            result.append({
+                "name": r[1].strip(),
+                "status": (r[2].strip() if len(r) > 2 else EMP_STATUS_ACTIVE),
+                "fired_date": (r[3].strip() if len(r) > 3 else ""),
+            })
+    _status_cache["data"] = result
+    _status_cache["ts"] = now
+    return result
+
+
+def get_employees(date: datetime | None = None) -> list[str]:
+    """
+    Список ФИО активных сотрудников.
+    Если есть лист «Сотрудники» — берём только активных оттуда.
+    Иначе — все из листа месяца (обратная совместимость).
+    """
+    status = get_status_list()
+    if status:
+        return [e["name"] for e in status if e["status"] == EMP_STATUS_ACTIVE]
+    return _all_month_names(date)
+
+
+def get_fired() -> list[dict]:
+    """Список уволенных: [{"name", "fired_date"}, ...]."""
+    return [
+        {"name": e["name"], "fired_date": e["fired_date"]}
+        for e in get_status_list()
+        if e["status"] == EMP_STATUS_FIRED
+    ]
+
+
+_rowmap_cache = {"data": {}, "ts": 0, "sheet": None}
+_ROWMAP_TTL = 60  # секунд
+
+
+def _row_by_name(ws, name: str) -> int | None:
+    """
+    Номер строки сотрудника по ФИО. Карта ФИО→строка кэшируется на 60 сек
+    для листа, чтобы не читать столбец на каждый тап.
+    """
+    now = time.time()
+    if (_rowmap_cache["sheet"] != ws.title
+            or now - _rowmap_cache["ts"] > _ROWMAP_TTL
+            or not _rowmap_cache["data"]):
+        names = ws.col_values(NAME_COL)
+        m = {}
+        for i, n in enumerate(names):
+            if i >= FIRST_DATA_ROW - 1 and n.strip():
+                m[n.strip()] = i + 1
+        _rowmap_cache["data"] = m
+        _rowmap_cache["ts"] = now
+        _rowmap_cache["sheet"] = ws.title
+    return _rowmap_cache["data"].get(name.strip())
+
+
+def set_rotation_return(name: str, return_date: str) -> bool:
+    """Сохраняет дату возврата с межвахты в лист «Сотрудники» (столбец E)."""
+    try:
+        ws = _open().worksheet(EMP_SHEET)
+    except Exception:
+        return False
+    grid = ws.get_all_values()
+    for i, r in enumerate(grid):
+        if i == 0:
+            continue
+        if len(r) >= 2 and r[1].strip() == name.strip():
+            ws.update_cell(i + 1, 5, return_date)  # E = Межвахта до
+            _status_cache["data"] = None
+            return True
+    return False
+
+
+def get_rotation_reminders(days_before: int = 3) -> list[dict]:
+    """
+    Возвращает тех, кто возвращается с межвахты в пределах days_before дней.
+    [{"name", "return_date"}]. Дата в формате ДД.ММ.
+    """
+    from datetime import timedelta
+    try:
+        ws = _open().worksheet(EMP_SHEET)
+    except Exception:
+        return []
+    grid = ws.get_all_values()
+    today = datetime.now().date()
+    result = []
+    for i, r in enumerate(grid):
+        if i == 0 or len(r) < 5:
+            continue
+        raw = r[4].strip()
+        if not raw:
+            continue
+        # парсим ДД.ММ или ДД.ММ.ГГГГ
+        parts = raw.split(".")
         try:
-            await bot.send_message(
-                chat_id=FOREMAN_CHAT_ID,
-                text=(f"✈️ {r['name']} возвращается {r['return_date']}. "
-                      f"Закажите билеты и обратите внимание на отметки."))
+            d = int(parts[0]); m = int(parts[1])
+            y = int(parts[2]) if len(parts) > 2 else today.year
+            ret = datetime(y, m, d).date()
         except Exception:
-            log.exception("Не удалось отправить напоминание о межвахте")
+            continue
+        delta = (ret - today).days
+        if 0 <= delta <= days_before:
+            result.append({"name": r[1].strip(), "return_date": raw})
+    return result
 
 
-# ================= ЗАПУСК =================
+def get_current_status(emp_index: int, date: datetime | None = None) -> str:
+    """
+    Возвращает текущее значение ДНЕВНОГО слота сотрудника.
+    Нужно для предупреждения о перезаписи.
+    """
+    date = date or datetime.now()
+    active = get_employees(date)
+    if emp_index >= len(active):
+        return ""
+    name = active[emp_index]
+    ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return ""
+    col = _day_col(date)
+    val = ws.cell(row, col).value
+    return (val or "").strip()
 
-async def main():
-    if not MAX_BOT_TOKEN:
-        raise RuntimeError("MAX_BOT_TOKEN не задан")
 
-    if os.getenv("RUN_REBUILD_DN") == "1":
+def set_status(emp_index: int, code: str, date: datetime | None = None):
+    """
+    Ставит статус сотруднику за конкретный день.
+    emp_index — индекс в списке get_employees() (активные).
+    Запись идёт по ФИО (поиск строки в листе месяца), чтобы уволенные
+    не сдвигали адресацию.
+    Возвращает (ФИО, код).
+    """
+    date = date or datetime.now()
+    active = get_employees(date)
+    if emp_index >= len(active):
+        return None, code
+    name = active[emp_index]
+
+    ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return name, code
+    col = _day_column(date)
+    ws.update_cell(row, col, code)
+    return name, code
+
+
+def day_summary(date: datetime | None = None) -> dict:
+    """
+    Сводка за день (модель день/ночь) по активным сотрудникам.
+    Считает дневной и ночной слоты. Один запрос на лист.
+    """
+    date = date or datetime.now()
+    active = set(get_employees(date))
+    ws = _worksheet_for(date)
+    grid = ws.get_all_values()
+
+    d_idx = _day_col(date) - 1
+    n_idx = _night_col(date) - 1
+
+    day_work = night_work = rest = sick = rotation = absent = 0
+    absent_list = []
+
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) < NAME_COL:
+            continue
+        name = r[NAME_COL - 1].strip()
+        if not name or name not in active:
+            continue
+        dval = r[d_idx].strip() if len(r) > d_idx else ""
+        nval = r[n_idx].strip() if len(r) > n_idx else ""
+
+        if dval == DN_DAY:
+            day_work += 1
+        elif dval == DN_REST:
+            rest += 1
+        elif dval == DN_SICK:
+            sick += 1
+            absent_list.append((name, dval))
+        elif dval == DN_ROTATION:
+            rotation += 1
+            absent_list.append((name, dval))
+        elif dval == DN_ABSENT:
+            absent += 1
+            absent_list.append((name, dval))
+
+        if nval == DN_NIGHT:
+            night_work += 1
+
+    return {
+        "day": day_work, "night": night_work, "rest": rest,
+        "sick": sick, "rotation": rotation, "absent": absent,
+        "absent_list": absent_list, "total": len(active),
+    }
+
+
+def fire_employee(name: str, fire_day: int, date: datetime | None = None) -> bool:
+    """
+    Помечает сотрудника уволенным в листе «Сотрудники»:
+    статус → 'уволен', дата увольнения → ДД.ММ.ГГГГ.
+    Строки в листах месяцев не трогает (история сохраняется).
+    """
+    date = date or datetime.now()
+    try:
+        ws = _open().worksheet(EMP_SHEET)
+    except Exception:
+        return False
+    grid = ws.get_all_values()
+    fire_date_str = f"{fire_day:02d}.{date.month:02d}.{date.year}"
+    for i, r in enumerate(grid):
+        if i == 0:
+            continue  # шапка
+        if len(r) >= 2 and r[1].strip() == name.strip():
+            row = i + 1
+            # C = статус, D = дата увольнения
+            ws.update_cell(row, 3, EMP_STATUS_FIRED)
+            ws.update_cell(row, 4, fire_date_str)
+            _status_cache["data"] = None  # сброс кэша
+            return True
+    return False
+
+
+def build_work_report(name: str, out_path: str, year: int = 2026) -> str | None:
+    """
+    Формирует Excel-график работы сотрудника за месяцы, где он работал
+    (есть непустые ячейки). Возвращает путь к файлу или None.
+    """
+    import openpyxl
+    from openpyxl.styles import Font, Alignment, Border, Side
+
+    sp = _open()
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    thin = Border(*[Side(style="thin")] * 4)
+    center = Alignment(horizontal="center", vertical="center")
+    bold = Font(bold=True)
+
+    any_data = False
+    for month_idx, month_name in enumerate(MONTHS_RU, 1):
         try:
-            n = await asyncio.to_thread(rebuild_daynight)
-            log.info("Структура ДЕНЬ/НОЧЬ пересоздана: %s сотрудников.", n)
-        except Exception as e:
-            log.exception("Ошибка пересоздания структуры: %s", e)
+            ws_src = sp.worksheet(month_name)
+        except Exception:
+            continue
+        grid = ws_src.get_all_values()
+        # ищем строку сотрудника
+        emp_row = None
+        for r in grid[FIRST_DATA_ROW - 1:]:
+            if len(r) >= NAME_COL and r[NAME_COL - 1].strip() == name.strip():
+                emp_row = r
+                break
+        if not emp_row:
+            continue
+        # значения дней (с FIRST_DAY_COL)
+        day_vals = emp_row[FIRST_DAY_COL - 1:]
+        if not any(v.strip() for v in day_vals):
+            continue  # месяц пустой — пропускаем
 
-    if os.getenv("RUN_EMPLOYEES") == "1":
-        try:
-            n = await asyncio.to_thread(create_employees_sheet)
-            log.info("Лист «Сотрудники» создан: %s активных.", n)
-        except Exception as e:
-            log.exception("Ошибка создания листа «Сотрудники»: %s", e)
+        any_data = True
+        ws_out = wb.create_sheet(month_name)
+        ws_out["A1"] = f"{name} — {month_name} {year}"
+        ws_out["A1"].font = Font(bold=True, size=12)
+        ws_out["A2"] = "День"
+        ws_out["B2"] = "Статус"
+        ws_out["A2"].font = bold
+        ws_out["B2"].font = bold
+        ws_out["A2"].border = thin
+        ws_out["B2"].border = thin
+        for d, v in enumerate(day_vals, 1):
+            ws_out.cell(row=d + 2, column=1, value=d).border = thin
+            c = ws_out.cell(row=d + 2, column=2, value=v.strip())
+            c.border = thin
+            c.alignment = center
+        ws_out.column_dimensions["A"].width = 6
+        ws_out.column_dimensions["B"].width = 10
 
-    if os.getenv("RUN_REORG") == "1":
-        try:
-            n = await asyncio.to_thread(reorganize)
-            log.info("Реорганизация выполнена: %s сотрудников.", n)
-        except Exception as e:
-            log.exception("Ошибка реорганизации: %s", e)
-
-    if os.getenv("RUN_SETUP") == "1":
-        try:
-            n = await asyncio.to_thread(setup_dropdowns)
-            log.info("Выпадающие списки настроены на %s листах.", n)
-        except Exception as e:
-            log.exception("Ошибка настройки списков: %s", e)
-
-    if os.getenv("RUN_REFRESH_DV") == "1":
-        try:
-            n = await asyncio.to_thread(refresh_validation)
-            log.info("Выпадающие списки обновлены (МУ) на 12 листах.")
-        except Exception as e:
-            log.exception("Ошибка обновления списков: %s", e)
-
-    scheduler = AsyncIOScheduler(timezone=TIMEZONE)
-    scheduler.add_job(rotation_reminders_job, CronTrigger(hour=9, minute=0))
-    scheduler.start()
-    log.info("Планировщик запущен (TZ=%s). Бот стартует...", TIMEZONE)
-
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    if not any_data:
+        return None
+    wb.save(out_path)
+    return out_path
