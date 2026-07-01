@@ -25,13 +25,28 @@ SPREADSHEET_ID = "1d7YqIAqWL9_cQQ7JpxqD_qV69q1NpVO3u58BzDlK73M"
 # Локально можно положить файл service_account.json рядом с кодом.
 CREDENTIALS_FILE = "service_account.json"
 
-# Коды статусов
+# Коды статусов (СТАРАЯ модель — пока оставлены для совместимости этапа перехода)
 CODE_PRESENT = "Я"   # явка
 CODE_ABSENT = "Н"    # неявка
 CODE_SICK = "Б"      # больничный
 CODE_VACATION = "О"  # отпуск
 CODE_WEEKEND = "В"   # выходной
 ALL_CODES = [CODE_PRESENT, CODE_ABSENT, CODE_SICK, CODE_VACATION, CODE_WEEKEND]
+
+# --- НОВАЯ модель ДЕНЬ/НОЧЬ ---
+# Дневной слот
+DN_DAY = "Д"       # работал день
+DN_REST = "О"      # отдых
+DN_SICK = "Б"      # больничный
+DN_ROTATION = "МЖ" # межвахта
+DN_ABSENT = "Н"    # неявка
+# Ночной слот
+DN_NIGHT = "НЧ"    # работал ночь
+
+DAY_CODES = [DN_DAY, DN_REST, DN_SICK, DN_ROTATION, DN_ABSENT]
+NIGHT_CODES = [DN_NIGHT, DN_REST]
+# Причины отсутствия (для шага «оставшиеся»)
+REASON_CODES = [DN_ABSENT, DN_SICK, DN_ROTATION]
 
 # Русские названия месяцев = названия листов
 MONTHS_RU = [
