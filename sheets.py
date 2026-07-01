@@ -9,6 +9,8 @@
 """
 
 import calendar
+import json
+import os
 from datetime import datetime
 
 import gspread
@@ -16,7 +18,11 @@ from google.oauth2.service_account import Credentials
 
 # --- Настройки ---
 SPREADSHEET_ID = "1d7YqIAqWL9_cQQ7JpxqD_qV69q1NpVO3u58BzDlK73M"
-CREDENTIALS_FILE = "service_account.json"  # JSON-ключ service account
+
+# JSON-ключ service account.
+# На Railway кладётся в переменную окружения GOOGLE_CREDENTIALS (весь JSON).
+# Локально можно положить файл service_account.json рядом с кодом.
+CREDENTIALS_FILE = "service_account.json"
 
 # Коды статусов
 CODE_PRESENT = "Я"   # явка
@@ -43,9 +49,21 @@ FIRST_DAY_COL = 2     # столбец B = день 1
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
+def _credentials():
+    """
+    Загружает Credentials.
+    Приоритет: переменная окружения GOOGLE_CREDENTIALS (для Railway),
+    иначе — локальный файл service_account.json.
+    """
+    raw = os.getenv("GOOGLE_CREDENTIALS")
+    if raw:
+        info = json.loads(raw)
+        return Credentials.from_service_account_info(info, scopes=SCOPES)
+    return Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+
+
 def _client():
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
-    return gspread.authorize(creds)
+    return gspread.authorize(_credentials())
 
 
 def _open():
