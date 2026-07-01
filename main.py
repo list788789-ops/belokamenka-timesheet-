@@ -189,12 +189,107 @@ async def cb_menu_mark(event: MessageCallback):
 
 @dp.message_callback(F.callback.payload == "menu:fire")
 async def cb_menu_fire(event: MessageCallback):
-    await event.message.answer("Оформление увольнения — в разработке.")
+    _fire_session["page"] = 0
+    _fire_session["day"] = None
+    _fire_session["name"] = None
+    await _send_fire_list(event.message, 0)
 
 
 @dp.message_callback(F.callback.payload == "menu:fired")
 async def cb_menu_fired(event: MessageCallback):
-    await event.message.answer("Список уволенных — в разработке.")
+    fired = await asyncio.to_thread(sheets.get_fired)
+    if not fired:
+        await event.message.answer("Уволенных нет.")
+        return
+    lines = ["Уволенные сотрудники:"]
+    for f in fired:
+        d = f["fired_date"] or "—"
+        lines.append(f"  ⚫ {f['name']} — уволен {d}")
+    await event.message.answer("\n".join(lines))
+
+
+# ---- Флоу увольнения ----
+_fire_session = {"page": 0, "day": None, "name": None, "awaiting_day": False}
+
+
+async def _send_fire_list(target, page: int):
+    employees = await asyncio.to_thread(sheets.get_employees)
+    total = len(employees)
+    start = page * PAGE_SIZE
+    chunk = employees[start:start + PAGE_SIZE]
+
+    kb = InlineKeyboardBuilder()
+    for i, name in enumerate(chunk, start=start):
+        kb.row(CallbackButton(text=f"{i + 1}. {name}", payload=f"fire:{i}"))
+    nav = []
+    if start + PAGE_SIZE < total:
+        nav.append(CallbackButton(text="Ещё ▼", payload=f"firepage:{page + 1}"))
+    if page > 0:
+        nav.append(CallbackButton(text="▲ Назад", payload=f"firepage:{page - 1}"))
+    if nav:
+        kb.row(*nav)
+    kb.row(CallbackButton(text="✖ Отмена", payload="firecancel"))
+    await target.answer("Кого увольняем?", attachments=[kb.as_markup()])
+
+
+@dp.message_callback(F.callback.payload.startswith("firepage:"))
+async def cb_fire_page(event: MessageCallback):
+    page = int(event.callback.payload.split(":")[1])
+    _fire_session["page"] = page
+    await _send_fire_list(event.message, page)
+
+
+@dp.message_callback(F.callback.payload.startswith("fire:"))
+async def cb_fire_pick(event: MessageCallback):
+    idx = int(event.callback.payload.split(":")[1])
+    employees = await asyncio.to_thread(sheets.get_employees)
+    if idx >= len(employees):
+        await event.message.answer("Сотрудник не найден.")
+        return
+    _fire_session["name"] = employees[idx]
+    _fire_session["awaiting_day"] = True
+    await event.message.answer(
+        f"Увольняем: {employees[idx]}\nВведите число месяца — дату увольнения:"
+    )
+
+
+@dp.message_callback(F.callback.payload == "fireconfirm")
+async def cb_fire_confirm(event: MessageCallback):
+    name = _fire_session["name"]
+    day = _fire_session["day"]
+    if not name or not day:
+        await event.message.answer("Данные увольнения потеряны, начните заново.")
+        return
+    # 1. Помечаем уволенным
+    ok = await asyncio.to_thread(sheets.fire_employee, name, day)
+    if not ok:
+        await event.message.answer("Не удалось обновить статус. Проверьте лист «Сотрудники».")
+        return
+    await event.message.answer(f"⚫ {name} уволен с {day:02d}.{datetime.now().month:02d}.")
+
+    # 2. Формируем Excel-график
+    safe = "".join(ch for ch in name if ch.isalnum() or ch in " _-").strip().replace(" ", "_")
+    out_path = f"/tmp/Otchet_{safe}.xlsx"
+    path = await asyncio.to_thread(sheets.build_work_report, name, out_path)
+    if path:
+        await event.message.answer(
+            "Файл с графиком работы сформирован. "
+            "⚠️ Почта пока не подключена — отправьте бухгалтеру вручную."
+        )
+        try:
+            await bot.send_file(chat_id=event.message.recipient.chat_id, path=path)
+        except Exception:
+            await event.message.answer("(Не удалось прикрепить файл в MAX — добавим отправку позже.)")
+    else:
+        await event.message.answer("График пуст — сотрудник не имеет отметок.")
+
+
+@dp.message_callback(F.callback.payload == "firecancel")
+async def cb_fire_cancel(event: MessageCallback):
+    _fire_session["name"] = None
+    _fire_session["day"] = None
+    _fire_session["awaiting_day"] = False
+    await event.message.answer("Увольнение отменено.")
 
 
 # ============ Отметка отсутствующих кнопками ============
@@ -291,9 +386,39 @@ async def cb_set_status(event: MessageCallback):
     idx = int(idx_s)
     day = _mark_session["day"] or datetime.now().day
     date = datetime.now().replace(day=day)
+
+    # Проверка перезаписи: если уже стоит Н/Б/О/В — предупреждаем
+    current = await asyncio.to_thread(sheets.get_current_status, idx, date)
+    if current in (sheets.CODE_ABSENT, sheets.CODE_SICK,
+                   sheets.CODE_VACATION, sheets.CODE_WEEKEND):
+        employees = await asyncio.to_thread(sheets.get_employees)
+        name = employees[idx] if idx < len(employees) else f"№{idx + 1}"
+        kb = InlineKeyboardBuilder()
+        kb.row(
+            CallbackButton(text="✅ Заменить", payload=f"force:{idx}:{code}"),
+            CallbackButton(text="✖ Отмена", payload=f"page:{_mark_session['page']}"),
+        )
+        await event.message.answer(
+            f"У {name} уже стоит «{current}». Заменить на «{code}»?",
+            attachments=[kb.as_markup()],
+        )
+        return
+
+    await _do_set(event, idx, code, date)
+
+
+@dp.message_callback(F.callback.payload.startswith("force:"))
+async def cb_force_status(event: MessageCallback):
+    _, idx_s, code = event.callback.payload.split(":")
+    idx = int(idx_s)
+    day = _mark_session["day"] or datetime.now().day
+    date = datetime.now().replace(day=day)
+    await _do_set(event, idx, code, date)
+
+
+async def _do_set(event, idx, code, date):
     name, _ = await asyncio.to_thread(sheets.set_status, idx, code, date)
     await event.message.answer(f"✔ {name} — {_STATUS_LABELS.get(code, code)}")
-    # Снова показываем список для следующего
     await _send_employee_list(event.message, _mark_session["day"], _mark_session["page"])
 
 
@@ -312,14 +437,32 @@ async def cb_finish(event: MessageCallback):
 
 @dp.message_created(F.message.body.text.regexp(r"^\d{1,2}$"))
 async def on_day_number(event: MessageCreated):
-    """Приём числа дня после нажатия 'Другой день'."""
-    if not _mark_session.get("awaiting_day"):
-        return
+    """Приём числа: либо дата увольнения, либо день для отметок."""
     day = int(event.message.body.text)
-    _mark_session["awaiting_day"] = False
-    _mark_session["day"] = day
-    _mark_session["page"] = 0
-    await _send_employee_list(event.message, day, 0)
+
+    # Приоритет — сессия увольнения
+    if _fire_session.get("awaiting_day"):
+        _fire_session["awaiting_day"] = False
+        _fire_session["day"] = day
+        name = _fire_session["name"]
+        kb = InlineKeyboardBuilder()
+        kb.row(
+            CallbackButton(text="✅ Уволить", payload="fireconfirm"),
+            CallbackButton(text="✖ Отмена", payload="firecancel"),
+        )
+        await event.message.answer(
+            f"Уволить {name} с {day:02d}.{datetime.now().month:02d}?\n"
+            f"Он исчезнет из списка отметок.",
+            attachments=[kb.as_markup()],
+        )
+        return
+
+    # Иначе — день для отметок
+    if _mark_session.get("awaiting_day"):
+        _mark_session["awaiting_day"] = False
+        _mark_session["day"] = day
+        _mark_session["page"] = 0
+        await _send_employee_list(event.message, day, 0)
 
 
 # ============ Запуск ============
