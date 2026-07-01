@@ -54,14 +54,15 @@ MONTHS_RU = [
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
 ]
 
-# Структура листа (после реорганизации):
+# Структура листа (модель ДЕНЬ/НОЧЬ):
 #   строка 1 — заголовок месяца
-#   строка 2 — шапка: A2="№", B2="ФИО", C2..="1","2",...
-#   строки 3+ — сотрудники: A=номер, B=ФИО, C.. — дни
-FIRST_DATA_ROW = 3
+#   строка 2 — числа дней (объединены над парой Д|Н)
+#   строка 3 — подписи слотов: Д | Н | Д | Н ...
+#   строки 4+ — сотрудники: A=№, B=ФИО, далее пары день/ночь
+FIRST_DATA_ROW = 4
 NUM_COL = 1           # столбец A = №
 NAME_COL = 2          # столбец B = ФИО
-FIRST_DAY_COL = 3     # столбец C = день 1
+FIRST_DAY_COL = 3     # столбец C = день 1 (дневной слот)
 
 # Лист-справочник сотрудников
 EMP_SHEET = "Сотрудники"
@@ -107,9 +108,19 @@ def _worksheet_for(date: datetime):
     return _open().worksheet(MONTHS_RU[date.month - 1])
 
 
+def _day_col(date: datetime) -> int:
+    """Столбец ДНЕВНОГО слота для числа (1-based). Пары: С=1Д, D=1Н, E=2Д..."""
+    return FIRST_DAY_COL + (date.day - 1) * 2
+
+
+def _night_col(date: datetime) -> int:
+    """Столбец НОЧНОГО слота для числа (1-based)."""
+    return _day_col(date) + 1
+
+
+# Совместимость со старым именем (если где-то ещё вызывается)
 def _day_column(date: datetime) -> int:
-    """Номер столбца для конкретного дня месяца (1-индексация gspread)."""
-    return FIRST_DAY_COL + (date.day - 1)
+    return _day_col(date)
 
 
 def _employee_count(ws) -> int:
@@ -119,79 +130,123 @@ def _employee_count(ws) -> int:
     return max(0, len(names) - (FIRST_DATA_ROW - 1))
 
 
-def fill_present(date: datetime | None = None):
-    """
-    08:00 — ставит "Я" во все ячейки дня.
-    Выходные (сб/вс) помечает "В".
-    """
+def _read_grid(date: datetime | None = None):
+    """Читает весь лист месяца одним запросом. Возвращает (ws, grid)."""
     date = date or datetime.now()
     ws = _worksheet_for(date)
-    col = _day_column(date)
-    n = _employee_count(ws)
-    if n == 0:
-        return 0
-
-    is_weekend = calendar.weekday(date.year, date.month, date.day) >= 5
-    value = CODE_WEEKEND if is_weekend else CODE_PRESENT
-
-    # Диапазон ячеек дня: от FIRST_DATA_ROW до FIRST_DATA_ROW+n-1
-    start = gspread.utils.rowcol_to_a1(FIRST_DATA_ROW, col)
-    end = gspread.utils.rowcol_to_a1(FIRST_DATA_ROW + n - 1, col)
-    cell_range = f"{start}:{end}"
-
-    cells = ws.range(cell_range)
-    for c in cells:
-        c.value = value
-    ws.update_cells(cells)
-    return n
+    return ws, ws.get_all_values()
 
 
-def read_day(date: datetime | None = None) -> list[str]:
-    """Возвращает список значений ячеек дня (по сотрудникам)."""
+def mark_day(name: str, date: datetime | None = None) -> bool:
+    """Прораб отметил присутствующего днём: ДЕНЬ=Д."""
     date = date or datetime.now()
     ws = _worksheet_for(date)
-    col = _day_column(date)
-    n = _employee_count(ws)
-    if n == 0:
-        return []
-    start = gspread.utils.rowcol_to_a1(FIRST_DATA_ROW, col)
-    end = gspread.utils.rowcol_to_a1(FIRST_DATA_ROW + n - 1, col)
-    cells = ws.range(f"{start}:{end}")
-    return [c.value for c in cells]
-
-
-def is_untouched(date: datetime | None = None) -> bool:
-    """
-    True, если за день НИ ОДНА ячейка не менялась —
-    то есть у всех стоит "Я" (для будней) или "В" (для выходных).
-    """
-    date = date or datetime.now()
-    is_weekend = calendar.weekday(date.year, date.month, date.day) >= 5
-    expected = CODE_WEEKEND if is_weekend else CODE_PRESENT
-    values = read_day(date)
-    if not values:
+    row = _row_by_name(ws, name)
+    if row is None:
         return False
-    return all(v == expected for v in values)
+    ws.update_cell(row, _day_col(date), DN_DAY)
+    return True
 
 
-def clear_day(date: datetime | None = None):
-    """
-    20:00 — если день не подтверждён: обнулить присутствие.
-    Ставит "Н" (неявка) во все ячейки дня.
-    """
+def mark_night(name: str, date: datetime | None = None) -> bool:
+    """Прораб отметил ночную смену: НОЧЬ=НЧ, ДЕНЬ=О (днём отдыхал)."""
     date = date or datetime.now()
     ws = _worksheet_for(date)
-    col = _day_column(date)
-    n = _employee_count(ws)
-    if n == 0:
-        return 0
-    start = gspread.utils.rowcol_to_a1(FIRST_DATA_ROW, col)
-    end = gspread.utils.rowcol_to_a1(FIRST_DATA_ROW + n - 1, col)
-    cells = ws.range(f"{start}:{end}")
-    for c in cells:
-        c.value = CODE_ABSENT
-    ws.update_cells(cells)
-    return n
+    row = _row_by_name(ws, name)
+    if row is None:
+        return False
+    # батчем два слота
+    ws.update_cell(row, _day_col(date), DN_REST)
+    ws.update_cell(row, _night_col(date), DN_NIGHT)
+    return True
+
+
+def set_reason(name: str, code: str, date: datetime | None = None) -> bool:
+    """Причина отсутствия в дневной слот: Н / Б / МЖ."""
+    date = date or datetime.now()
+    ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return False
+    ws.update_cell(row, _day_col(date), code)
+    return True
+
+
+def set_rest(name: str, date: datetime | None = None) -> bool:
+    """Автоотдых с ночи: ДЕНЬ=О."""
+    date = date or datetime.now()
+    ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return False
+    ws.update_cell(row, _day_col(date), DN_REST)
+    return True
+
+
+def get_night_rest(date: datetime | None = None) -> list[str]:
+    """
+    Кто вчера работал в ночь (НОЧЬ=НЧ) — тем сегодня положен отдых днём.
+    Корректно смотрит в прошлый месяц при переходе через 1-е число.
+    """
+    date = date or datetime.now()
+    from datetime import timedelta
+    yday = date - timedelta(days=1)
+    try:
+        ws, grid = _read_grid(yday)
+    except Exception:
+        return []
+    night_idx = _night_col(yday) - 1  # 0-based
+    active = set(get_employees(date))
+    result = []
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) <= NAME_COL - 1:
+            continue
+        name = r[NAME_COL - 1].strip()
+        if name in active and len(r) > night_idx and r[night_idx].strip() == DN_NIGHT:
+            result.append(name)
+    return result
+
+
+def get_day_slot(name: str, date: datetime | None = None) -> str:
+    """Текущее значение дневного слота сотрудника."""
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    col_idx = _day_col(date) - 1
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) > NAME_COL - 1 and r[NAME_COL - 1].strip() == name.strip():
+            return r[col_idx].strip() if len(r) > col_idx else ""
+    return ""
+
+
+def get_unmarked_day(date: datetime | None = None) -> list[str]:
+    """Активные, у кого дневной слот ПУСТ (ещё не отмечены утром)."""
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    col_idx = _day_col(date) - 1
+    active = get_employees(date)
+    present = {}
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) > NAME_COL - 1:
+            nm = r[NAME_COL - 1].strip()
+            present[nm] = r[col_idx].strip() if len(r) > col_idx else ""
+    return [n for n in active if not present.get(n, "")]
+
+
+def get_not_worked_day(date: datetime | None = None) -> list[str]:
+    """
+    Для вечера: активные, кто НЕ работал днём (слот != Д).
+    Их можно поставить в ночь.
+    """
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    col_idx = _day_col(date) - 1
+    active = get_employees(date)
+    day_val = {}
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) > NAME_COL - 1:
+            nm = r[NAME_COL - 1].strip()
+            day_val[nm] = r[col_idx].strip() if len(r) > col_idx else ""
+    return [n for n in active if day_val.get(n, "") != DN_DAY]
 
 
 def _all_month_names(date: datetime | None = None) -> list[str]:
@@ -264,9 +319,59 @@ def _row_by_name(ws, name: str) -> int | None:
     return None
 
 
+def set_rotation_return(name: str, return_date: str) -> bool:
+    """Сохраняет дату возврата с межвахты в лист «Сотрудники» (столбец E)."""
+    try:
+        ws = _open().worksheet(EMP_SHEET)
+    except Exception:
+        return False
+    grid = ws.get_all_values()
+    for i, r in enumerate(grid):
+        if i == 0:
+            continue
+        if len(r) >= 2 and r[1].strip() == name.strip():
+            ws.update_cell(i + 1, 5, return_date)  # E = Межвахта до
+            _status_cache["data"] = None
+            return True
+    return False
+
+
+def get_rotation_reminders(days_before: int = 3) -> list[dict]:
+    """
+    Возвращает тех, кто возвращается с межвахты в пределах days_before дней.
+    [{"name", "return_date"}]. Дата в формате ДД.ММ.
+    """
+    from datetime import timedelta
+    try:
+        ws = _open().worksheet(EMP_SHEET)
+    except Exception:
+        return []
+    grid = ws.get_all_values()
+    today = datetime.now().date()
+    result = []
+    for i, r in enumerate(grid):
+        if i == 0 or len(r) < 5:
+            continue
+        raw = r[4].strip()
+        if not raw:
+            continue
+        # парсим ДД.ММ или ДД.ММ.ГГГГ
+        parts = raw.split(".")
+        try:
+            d = int(parts[0]); m = int(parts[1])
+            y = int(parts[2]) if len(parts) > 2 else today.year
+            ret = datetime(y, m, d).date()
+        except Exception:
+            continue
+        delta = (ret - today).days
+        if 0 <= delta <= days_before:
+            result.append({"name": r[1].strip(), "return_date": raw})
+    return result
+
+
 def get_current_status(emp_index: int, date: datetime | None = None) -> str:
     """
-    Возвращает текущее значение ячейки сотрудника за день.
+    Возвращает текущее значение ДНЕВНОГО слота сотрудника.
     Нужно для предупреждения о перезаписи.
     """
     date = date or datetime.now()
@@ -278,7 +383,7 @@ def get_current_status(emp_index: int, date: datetime | None = None) -> str:
     row = _row_by_name(ws, name)
     if row is None:
         return ""
-    col = _day_column(date)
+    col = _day_col(date)
     val = ws.cell(row, col).value
     return (val or "").strip()
 
@@ -308,17 +413,19 @@ def set_status(emp_index: int, code: str, date: datetime | None = None):
 
 def day_summary(date: datetime | None = None) -> dict:
     """
-    Сводка за день по активным сотрудникам.
-    Одним запросом читает весь лист месяца, считает в памяти.
+    Сводка за день (модель день/ночь) по активным сотрудникам.
+    Считает дневной и ночной слоты. Один запрос на лист.
     """
     date = date or datetime.now()
-    active = set(get_employees(date))  # активные ФИО
+    active = set(get_employees(date))
     ws = _worksheet_for(date)
-    grid = ws.get_all_values()  # ОДИН запрос на весь лист
+    grid = ws.get_all_values()
 
-    day_col_idx = _day_column(date) - 1  # 0-based
-    counts = {c: 0 for c in ALL_CODES}
-    absent = []
+    d_idx = _day_col(date) - 1
+    n_idx = _night_col(date) - 1
+
+    day_work = night_work = rest = sick = rotation = absent = 0
+    absent_list = []
 
     for r in grid[FIRST_DATA_ROW - 1:]:
         if len(r) < NAME_COL:
@@ -326,12 +433,31 @@ def day_summary(date: datetime | None = None) -> dict:
         name = r[NAME_COL - 1].strip()
         if not name or name not in active:
             continue
-        val = r[day_col_idx].strip() if len(r) > day_col_idx else ""
-        if val in counts:
-            counts[val] += 1
-        if val in (CODE_ABSENT, CODE_SICK, CODE_VACATION):
-            absent.append((name, val))
-    return {"counts": counts, "absent": absent, "total": len(active)}
+        dval = r[d_idx].strip() if len(r) > d_idx else ""
+        nval = r[n_idx].strip() if len(r) > n_idx else ""
+
+        if dval == DN_DAY:
+            day_work += 1
+        elif dval == DN_REST:
+            rest += 1
+        elif dval == DN_SICK:
+            sick += 1
+            absent_list.append((name, dval))
+        elif dval == DN_ROTATION:
+            rotation += 1
+            absent_list.append((name, dval))
+        elif dval == DN_ABSENT:
+            absent += 1
+            absent_list.append((name, dval))
+
+        if nval == DN_NIGHT:
+            night_work += 1
+
+    return {
+        "day": day_work, "night": night_work, "rest": rest,
+        "sick": sick, "rotation": rotation, "absent": absent,
+        "absent_list": absent_list, "total": len(active),
+    }
 
 
 def fire_employee(name: str, fire_day: int, date: datetime | None = None) -> bool:
