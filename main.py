@@ -20,6 +20,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 import sheets
 from setup_dropdowns import setup_dropdowns
+from reorganize import reorganize
 
 # --- MAX Bot API (библиотека maxapi, см. requirements.txt) ---
 from maxapi import Bot, Dispatcher
@@ -147,6 +148,15 @@ async def show_chat_id(event: MessageCreated):
 async def main():
     if not MAX_BOT_TOKEN:
         raise RuntimeError("MAX_BOT_TOKEN не задан в переменных окружения")
+
+    # Разовая реорганизация: № + сортировка ФИО + сдвиг дней.
+    # Включается RUN_REORG=1. После успеха убери переменную.
+    if os.getenv("RUN_REORG") == "1":
+        try:
+            n = await asyncio.to_thread(reorganize)
+            log.info("Реорганизация выполнена: %s сотрудников.", n)
+        except Exception as e:
+            log.exception("Ошибка реорганизации: %s", e)
 
     # Разовая настройка выпадающих списков.
     # Включается переменной RUN_SETUP=1. После успеха убери её, чтобы
