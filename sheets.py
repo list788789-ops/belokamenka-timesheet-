@@ -70,6 +70,11 @@ EMP_SHEET = "Сотрудники"
 EMP_STATUS_ACTIVE = "активен"
 EMP_STATUS_FIRED = "уволен"
 
+# Лист пользователей бота (доступ)
+USERS_SHEET = "Пользователи"
+ROLE_ADMIN = "админ"
+ROLE_FOREMAN = "прораб"
+
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
@@ -726,3 +731,80 @@ def build_work_report(name: str, out_path: str, year: int = 2026) -> str | None:
         return None
     wb.save(out_path)
     return out_path
+
+
+# ================= ПОЛЬЗОВАТЕЛИ (ДОСТУП) =================
+
+_users_cache = {"data": None, "ts": 0}
+_USERS_TTL = 20
+
+
+def _ensure_users_sheet():
+    """Создаёт лист «Пользователи», если его нет. Заполняет шапку."""
+    sp = _open()
+    try:
+        sp.worksheet(USERS_SHEET)
+        return
+    except Exception:
+        pass
+    sp.batch_update({"requests": [
+        {"addSheet": {"properties": {"title": USERS_SHEET}}}
+    ]})
+    ws = sp.worksheet(USERS_SHEET)
+    ws.update("A1", [["chat_id", "Имя", "Роль"]])
+
+
+def get_users(force: bool = False) -> list[dict]:
+    """Список пользователей бота: [{chat_id, name, role}]."""
+    now = time.time()
+    if (not force and _users_cache["data"] is not None
+            and now - _users_cache["ts"] < _USERS_TTL):
+        return _users_cache["data"]
+    try:
+        ws = _open().worksheet(USERS_SHEET)
+    except Exception:
+        return []
+    rows = ws.get_all_values()[1:]
+    result = []
+    for r in rows:
+        if r and r[0].strip():
+            try:
+                cid = int(r[0].strip())
+            except ValueError:
+                continue
+            result.append({
+                "chat_id": cid,
+                "name": (r[1].strip() if len(r) > 1 else ""),
+                "role": (r[2].strip() if len(r) > 2 else ROLE_FOREMAN),
+            })
+    _users_cache["data"] = result
+    _users_cache["ts"] = now
+    return result
+
+
+def is_allowed(chat_id: int) -> bool:
+    """Разрешён ли пользователь (есть в списке)."""
+    return any(u["chat_id"] == chat_id for u in get_users())
+
+
+def get_role(chat_id: int) -> str | None:
+    for u in get_users():
+        if u["chat_id"] == chat_id:
+            return u["role"]
+    return None
+
+
+def add_user(chat_id: int, name: str = "", role: str = ROLE_FOREMAN) -> bool:
+    """Добавляет пользователя в лист «Пользователи»."""
+    _ensure_users_sheet()
+    if is_allowed(chat_id):
+        return False  # уже есть
+    ws = _open().worksheet(USERS_SHEET)
+    ws.append_row([str(chat_id), name, role])
+    _users_cache["data"] = None
+    return True
+
+
+def get_admins() -> list[int]:
+    """chat_id всех админов."""
+    return [u["chat_id"] for u in get_users() if u["role"] == ROLE_ADMIN]
