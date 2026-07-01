@@ -145,6 +145,23 @@ async def _edit_or_send(event_or_target, text, markup=None):
         await msg.answer(text)
 
 
+async def _finish(event_or_target, text):
+    """
+    Финальное сообщение без кнопок: удаляет текущее сообщение с кнопками
+    и шлёт чистый текст. Если delete не поддержан — просто шлёт новое.
+    """
+    msg = getattr(event_or_target, "message", event_or_target)
+    for obj in (event_or_target, msg):
+        fn = getattr(obj, "delete", None)
+        if callable(fn):
+            try:
+                await fn()
+                break
+            except Exception as e:
+                log.warning("delete failed: %s", e)
+    await msg.answer(text)
+
+
 async def _send_morning_list(target, page: int, edit_event=None):
     """Список неотмеченных днём. Если edit_event задан — правит на месте."""
     unmarked = await asyncio.to_thread(sheets.get_unmarked_day)
@@ -280,8 +297,7 @@ async def cb_morning_done(event: MessageCallback):
     """Присутствующие отмечены — переходим к причинам для оставшихся."""
     remaining = await asyncio.to_thread(sheets.get_unmarked_day)
     if not remaining:
-        await _edit_or_send(event, "Все отмечены. Утро завершено.",
-                            InlineKeyboardBuilder().as_markup())
+        await _finish(event, "Все отмечены. Утро завершено.")
         return
     _morning["reason_mode"] = True
     await _send_reason_list(event.message, edit_event=event)
@@ -292,9 +308,8 @@ async def _send_reason_list(target, edit_event=None, page: int = 0):
     remaining = await asyncio.to_thread(sheets.get_unmarked_day)
     if not remaining:
         txt = "Причины проставлены всем. Утро завершено."
-        empty_kb = InlineKeyboardBuilder().as_markup()
         if edit_event is not None:
-            await _edit_or_send(edit_event, txt, empty_kb)
+            await _finish(edit_event, txt)
         else:
             await target.answer(txt)
         return
@@ -347,8 +362,7 @@ async def cb_reason_finish(event: MessageCallback):
 @dp.message_callback(F.callback.payload == "rsnfinish_yes")
 async def cb_reason_finish_yes(event: MessageCallback):
     n = await asyncio.to_thread(sheets.fill_unmarked_absent)
-    await _edit_or_send(event, f"Утро завершено. Неявка проставлена: {n} чел.",
-                        InlineKeyboardBuilder().as_markup())
+    await _finish(event, f"Утро завершено. Неявка проставлена: {n} чел.")
 
 
 @dp.message_callback(F.callback.payload == "rsnfinish_no")
@@ -484,8 +498,7 @@ async def cb_mark_night(event: MessageCallback):
 
 @dp.message_callback(F.callback.payload == "edone")
 async def cb_evening_done(event: MessageCallback):
-    await _edit_or_send(event, "🌙 Вечерняя отметка завершена.",
-                        InlineKeyboardBuilder().as_markup())
+    await _finish(event, "🌙 Вечерняя отметка завершена.")
 
 
 # ================= УВОЛЬНЕНИЕ =================
@@ -529,13 +542,12 @@ async def cb_menu_clearall(event: MessageCallback):
 @dp.message_callback(F.callback.payload == "clearall_yes")
 async def cb_clearall_yes(event: MessageCallback):
     n = await asyncio.to_thread(sheets.clear_all_day)
-    empty_kb = InlineKeyboardBuilder().as_markup()
-    await _edit_or_send(event, f"🧹 Очищено за сегодня: {n} сотрудников (день+ночь).", empty_kb)
+    await _finish(event, f"🧹 Очищено за сегодня: {n} сотрудников (день+ночь).")
 
 
 @dp.message_callback(F.callback.payload == "clearall_no")
 async def cb_clearall_no(event: MessageCallback):
-    await _edit_or_send(event, "Отменено.", InlineKeyboardBuilder().as_markup())
+    await _finish(event, "Отменено.")
 
 
 async def _send_fire_list(target, page: int):
