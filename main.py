@@ -108,11 +108,37 @@ async def cb_today(event: MessageCallback):
     await event.message.answer("\n".join(lines))
 
 
-# ================= УТРО =================
-# Сессия утренней отметки
-_morning = {"page": 0, "reason_mode": False}
-_clear_m = {"page": 0}
-_clear_e = {"page": 0}
+# ================= СЕССИИ ПО ПОЛЬЗОВАТЕЛЯМ =================
+# Каждый прораб имеет своё состояние, чтобы не перебивать других.
+_sessions = {}
+
+
+def _new_session():
+    return {
+        "morning": {"page": 0, "reason_mode": False},
+        "evening": {"page": 0},
+        "clear_m": {"page": 0},
+        "clear_e": {"page": 0},
+        "fire": {"page": 0, "day": None, "name": None, "awaiting_day": False},
+        "rotation": {"name": None, "active": False},
+    }
+
+
+def _chat_id(event):
+    """Достаёт chat_id из события (callback или message)."""
+    try:
+        msg = getattr(event, "message", event)
+        return msg.recipient.chat_id
+    except Exception:
+        return 0
+
+
+def _sess(event):
+    """Возвращает состояние сессии текущего пользователя."""
+    cid = _chat_id(event)
+    if cid not in _sessions:
+        _sessions[cid] = _new_session()
+    return _sessions[cid]
 
 
 async def _edit_or_send(event_or_target, text, markup=None):
@@ -192,8 +218,9 @@ async def _send_morning_list(target, page: int, edit_event=None):
 async def cb_menu_morning(event: MessageCallback):
     if not _is_foreman(event):
         return
-    _morning["page"] = 0
-    _morning["reason_mode"] = False
+    s = _sess(event)
+    s["morning"]["page"] = 0
+    s["morning"]["reason_mode"] = False
 
     # Проверка прерванной отметки
     prog = await asyncio.to_thread(sheets.morning_progress)
@@ -225,19 +252,19 @@ async def _morning_start(target):
 
 @dp.message_callback(F.callback.payload == "mcontinue")
 async def cb_morning_continue(event: MessageCallback):
-    _morning["page"] = 0
+    _sess(event)["morning"]["page"] = 0
     await _send_morning_list(event.message, 0)
 
 
 @dp.message_callback(F.callback.payload == "mrestart")
 async def cb_morning_restart(event: MessageCallback):
-    _morning["page"] = 0
+    _sess(event)["morning"]["page"] = 0
     await _morning_start(event.message)
 
 
 @dp.message_callback(F.callback.payload == "mclear")
 async def cb_morning_clear_list(event: MessageCallback):
-    _clear_m["page"] = 0
+    _sess(event)["clear_m"]["page"] = 0
     await _send_morning_clear_list(event, 0)
 
 
@@ -267,7 +294,7 @@ async def _send_morning_clear_list(event, page: int):
 @dp.message_callback(F.callback.payload.startswith("mclrpage:"))
 async def cb_morning_clear_page(event: MessageCallback):
     page = int(event.callback.payload.split(":")[1])
-    _clear_m["page"] = page
+    _sess(event)["clear_m"]["page"] = page
     await _send_morning_clear_list(event, page)
 
 
@@ -275,13 +302,13 @@ async def cb_morning_clear_page(event: MessageCallback):
 async def cb_morning_clear_do(event: MessageCallback):
     name = event.callback.payload.split(":", 1)[1]
     await asyncio.to_thread(sheets.clear_day_slot, name)
-    await _send_morning_clear_list(event, _clear_m["page"])
+    await _send_morning_clear_list(event, _sess(event)["clear_m"]["page"])
 
 
 @dp.message_callback(F.callback.payload.startswith("mpage:"))
 async def cb_morning_page(event: MessageCallback):
     page = int(event.callback.payload.split(":")[1])
-    _morning["page"] = page
+    _sess(event)["morning"]["page"] = page
     await _send_morning_list(event.message, page, edit_event=event)
 
 
@@ -289,7 +316,7 @@ async def cb_morning_page(event: MessageCallback):
 async def cb_mark_day(event: MessageCallback):
     name = event.callback.payload.split(":", 1)[1]
     await asyncio.to_thread(sheets.mark_day, name)
-    await _send_morning_list(event.message, _morning["page"], edit_event=event)
+    await _send_morning_list(event.message, _sess(event)["morning"]["page"], edit_event=event)
 
 
 @dp.message_callback(F.callback.payload == "mdone")
@@ -299,7 +326,7 @@ async def cb_morning_done(event: MessageCallback):
     if not remaining:
         await _finish(event, "Все отмечены. Утро завершено.")
         return
-    _morning["reason_mode"] = True
+    _sess(event)["morning"]["reason_mode"] = True
     await _send_reason_list(event.message, edit_event=event)
 
 
@@ -390,8 +417,9 @@ async def cb_set_reason(event: MessageCallback):
     _, name, code = event.callback.payload.split(":", 2)
     if code == sheets.DN_ROTATION:
         # межвахта → спрашиваем дату возврата
-        _rotation_wait["name"] = name
-        _rotation_wait["active"] = True
+        rot = _sess(event)["rotation"]
+        rot["name"] = name
+        rot["active"] = True
         await asyncio.to_thread(sheets.set_reason, name, code)
         await _edit_or_send(
             event,
@@ -402,7 +430,6 @@ async def cb_set_reason(event: MessageCallback):
 
 
 # ================= ВЕЧЕР =================
-_evening = {"page": 0}
 
 
 async def _send_evening_list(target, page: int, edit_event=None):
@@ -433,7 +460,7 @@ async def _send_evening_list(target, page: int, edit_event=None):
 
 @dp.message_callback(F.callback.payload == "eclear")
 async def cb_evening_clear_list(event: MessageCallback):
-    _clear_e["page"] = 0
+    _sess(event)["clear_e"]["page"] = 0
     await _send_evening_clear_list(event, 0)
 
 
@@ -463,7 +490,7 @@ async def _send_evening_clear_list(event, page: int):
 @dp.message_callback(F.callback.payload.startswith("eclrpage:"))
 async def cb_evening_clear_page(event: MessageCallback):
     page = int(event.callback.payload.split(":")[1])
-    _clear_e["page"] = page
+    _sess(event)["clear_e"]["page"] = page
     await _send_evening_clear_list(event, page)
 
 
@@ -471,21 +498,21 @@ async def cb_evening_clear_page(event: MessageCallback):
 async def cb_evening_clear_do(event: MessageCallback):
     name = event.callback.payload.split(":", 1)[1]
     await asyncio.to_thread(sheets.clear_night_slot, name)
-    await _send_evening_clear_list(event, _clear_e["page"])
+    await _send_evening_clear_list(event, _sess(event)["clear_e"]["page"])
 
 
 @dp.message_callback(F.callback.payload == "menu:evening")
 async def cb_menu_evening(event: MessageCallback):
     if not _is_foreman(event):
         return
-    _evening["page"] = 0
+    _sess(event)["evening"]["page"] = 0
     await _send_evening_list(event.message, 0)
 
 
 @dp.message_callback(F.callback.payload.startswith("epage:"))
 async def cb_evening_page(event: MessageCallback):
     page = int(event.callback.payload.split(":")[1])
-    _evening["page"] = page
+    _sess(event)["evening"]["page"] = page
     await _send_evening_list(event.message, page, edit_event=event)
 
 
@@ -493,7 +520,7 @@ async def cb_evening_page(event: MessageCallback):
 async def cb_mark_night(event: MessageCallback):
     name = event.callback.payload.split(":", 1)[1]
     await asyncio.to_thread(sheets.mark_night, name)
-    await _send_evening_list(event.message, _evening["page"], edit_event=event)
+    await _send_evening_list(event.message, _sess(event)["evening"]["page"], edit_event=event)
 
 
 @dp.message_callback(F.callback.payload == "edone")
@@ -502,14 +529,13 @@ async def cb_evening_done(event: MessageCallback):
 
 
 # ================= УВОЛЬНЕНИЕ =================
-_fire_session = {"page": 0, "day": None, "name": None, "awaiting_day": False}
 
 
 @dp.message_callback(F.callback.payload == "menu:fire")
 async def cb_menu_fire(event: MessageCallback):
     if not _is_foreman(event):
         return
-    _fire_session.update({"page": 0, "day": None, "name": None, "awaiting_day": False})
+    _sess(event)["fire"].update({"page": 0, "day": None, "name": None, "awaiting_day": False})
     await _send_fire_list(event.message, 0)
 
 
@@ -572,7 +598,7 @@ async def _send_fire_list(target, page: int):
 @dp.message_callback(F.callback.payload.startswith("firepage:"))
 async def cb_fire_page(event: MessageCallback):
     page = int(event.callback.payload.split(":")[1])
-    _fire_session["page"] = page
+    _sess(event)["fire"]["page"] = page
     await _send_fire_list(event.message, page)
 
 
@@ -583,16 +609,18 @@ async def cb_fire_pick(event: MessageCallback):
     if idx >= len(employees):
         await event.message.answer("Сотрудник не найден.")
         return
-    _fire_session["name"] = employees[idx]
-    _fire_session["awaiting_day"] = True
+    fs = _sess(event)["fire"]
+    fs["name"] = employees[idx]
+    fs["awaiting_day"] = True
     await event.message.answer(
         f"Увольняем: {employees[idx]}\nВведите число месяца — дату увольнения:")
 
 
 @dp.message_callback(F.callback.payload == "fireconfirm")
 async def cb_fire_confirm(event: MessageCallback):
-    name = _fire_session["name"]
-    day = _fire_session["day"]
+    fs = _sess(event)["fire"]
+    name = fs["name"]
+    day = fs["day"]
     if not name or not day:
         await event.message.answer("Данные увольнения потеряны, начните заново.")
         return
@@ -615,22 +643,22 @@ async def cb_fire_confirm(event: MessageCallback):
 
 @dp.message_callback(F.callback.payload == "firecancel")
 async def cb_fire_cancel(event: MessageCallback):
-    _fire_session.update({"name": None, "day": None, "awaiting_day": False})
+    _sess(event)["fire"].update({"name": None, "day": None, "awaiting_day": False})
     await event.message.answer("Увольнение отменено.")
 
 
 # ================= ВВОД ЧИСЕЛ / ДАТ =================
-_rotation_wait = {"name": None, "active": False}
 
 
 @dp.message_created(F.message.body.text.regexp(r"^\d{1,2}\.\d{1,2}$"))
 async def on_date_ddmm(event: MessageCreated):
     """Дата возврата с межвахты (ДД.ММ)."""
-    if not _rotation_wait.get("active"):
+    rot = _sess(event)["rotation"]
+    if not rot.get("active"):
         return
-    name = _rotation_wait["name"]
-    _rotation_wait["active"] = False
-    _rotation_wait["name"] = None
+    name = rot["name"]
+    rot["active"] = False
+    rot["name"] = None
     await asyncio.to_thread(sheets.set_rotation_return, name, event.message.body.text)
     await event.message.answer(
         f"✔ {name}: межвахта до {event.message.body.text}. "
@@ -642,10 +670,11 @@ async def on_date_ddmm(event: MessageCreated):
 async def on_day_number(event: MessageCreated):
     """Число — дата увольнения."""
     day = int(event.message.body.text)
-    if _fire_session.get("awaiting_day"):
-        _fire_session["awaiting_day"] = False
-        _fire_session["day"] = day
-        name = _fire_session["name"]
+    fs = _sess(event)["fire"]
+    if fs.get("awaiting_day"):
+        fs["awaiting_day"] = False
+        fs["day"] = day
+        name = fs["name"]
         kb = InlineKeyboardBuilder()
         kb.row(
             CallbackButton(text="✅ Уволить", payload="fireconfirm"),
