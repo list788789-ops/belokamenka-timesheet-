@@ -34,9 +34,9 @@ def create_employees_sheet():
         ).execute()
 
     # 2. Заполняем шапку и данные
-    rows = [["№", "ФИО", "Статус", "Дата увольнения"]]
+    rows = [["№", "ФИО", "Статус", "Дата увольнения", "Межвахта до"]]
     for i, name in enumerate(EMPLOYEES, 1):
-        rows.append([i, name, STATUS_ACTIVE, ""])
+        rows.append([i, name, STATUS_ACTIVE, "", ""])
 
     service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
