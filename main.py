@@ -22,6 +22,8 @@ import sheets
 from setup_dropdowns import setup_dropdowns
 from reorganize import reorganize
 from employees_sheet import create_employees_sheet
+from rebuild_daynight import rebuild_daynight
+from daynight_structure import rebuild as rebuild_daynight
 
 # --- MAX Bot API (библиотека maxapi, см. requirements.txt) ---
 from maxapi import Bot, Dispatcher, F
@@ -466,6 +468,23 @@ async def on_day_number(event: MessageCreated):
 async def main():
     if not MAX_BOT_TOKEN:
         raise RuntimeError("MAX_BOT_TOKEN не задан в переменных окружения")
+
+    # ЭТАП 1 модели день/ночь: пересоздание структуры (62 столбца).
+    # Включается RUN_DAYNIGHT=1. ⚠️ ОБНУЛЯЕТ данные. После успеха убери.
+    if os.getenv("RUN_DAYNIGHT") == "1":
+        try:
+            n = await asyncio.to_thread(rebuild_daynight)
+            log.info("Структура день/ночь создана: %s сотрудников.", n)
+        except Exception as e:
+            log.exception("Ошибка создания структуры день/ночь: %s", e)
+
+    # ЭТАП 1: пересоздание структуры ДЕНЬ/НОЧЬ. RUN_REBUILD_DN=1 (обнуляет данные!).
+    if os.getenv("RUN_REBUILD_DN") == "1":
+        try:
+            n = await asyncio.to_thread(rebuild_daynight)
+            log.info("Структура ДЕНЬ/НОЧЬ пересоздана: %s сотрудников.", n)
+        except Exception as e:
+            log.exception("Ошибка пересоздания структуры: %s", e)
 
     # Разовое создание листа «Сотрудники». Включается RUN_EMPLOYEES=1.
     if os.getenv("RUN_EMPLOYEES") == "1":
