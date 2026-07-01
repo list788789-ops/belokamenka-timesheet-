@@ -127,6 +127,24 @@ def rebuild_daynight():
             c0 = FIRST_DAY_COL_IDX + d * 2
             requests.append(_merge_request(sheet_id, 1, c0, c0 + 2))
 
+        # центрируем строку чисел (строка 2) над парами
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1, "endRowIndex": 2,
+                    "startColumnIndex": FIRST_DAY_COL_IDX,
+                    "endColumnIndex": FIRST_DAY_COL_IDX + days * 2,
+                },
+                "cell": {"userEnteredFormat": {
+                    "horizontalAlignment": "CENTER",
+                    "verticalAlignment": "MIDDLE",
+                    "textFormat": {"bold": True},
+                }},
+                "fields": "userEnteredFormat(horizontalAlignment,verticalAlignment,textFormat)",
+            }
+        })
+
         # выпадающие списки + подсветка выходных
         for d in range(days):
             day_col = FIRST_DAY_COL_IDX + d * 2
