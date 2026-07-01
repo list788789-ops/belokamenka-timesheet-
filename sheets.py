@@ -40,13 +40,14 @@ DN_REST = "О"      # отдых
 DN_SICK = "Б"      # больничный
 DN_ROTATION = "МЖ" # межвахта
 DN_ABSENT = "Н"    # неявка
+DN_MIGR = "МУ"     # миграционный учёт
 # Ночной слот
 DN_NIGHT = "НЧ"    # работал ночь
 
-DAY_CODES = [DN_DAY, DN_REST, DN_SICK, DN_ROTATION, DN_ABSENT]
+DAY_CODES = [DN_DAY, DN_REST, DN_SICK, DN_ROTATION, DN_ABSENT, DN_MIGR]
 NIGHT_CODES = [DN_NIGHT, DN_REST]
 # Причины отсутствия (для шага «оставшиеся»)
-REASON_CODES = [DN_ABSENT, DN_SICK, DN_ROTATION]
+REASON_CODES = [DN_ABSENT, DN_SICK, DN_ROTATION, DN_MIGR]
 
 # Русские названия месяцев = названия листов
 MONTHS_RU = [
@@ -222,6 +223,87 @@ def set_rest(name: str, date: datetime | None = None) -> bool:
     ws.update_cell(row, col, DN_REST)
     _grid_set(ws, row, col, DN_REST)
     return True
+
+
+def clear_day_slot(name: str, date: datetime | None = None) -> bool:
+    """Очистка дневного слота сотрудника (Д→пусто). Ночной не трогаем."""
+    date = date or datetime.now()
+    ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return False
+    col = _day_col(date)
+    ws.update_cell(row, col, "")
+    _grid_set(ws, row, col, "")
+    return True
+
+
+def clear_night_slot(name: str, date: datetime | None = None) -> bool:
+    """Очистка ночного слота сотрудника (Н→пусто). Дневной не трогаем."""
+    date = date or datetime.now()
+    ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return False
+    col = _night_col(date)
+    ws.update_cell(row, col, "")
+    _grid_set(ws, row, col, "")
+    return True
+
+
+def get_marked_day(date: datetime | None = None) -> list[str]:
+    """Активные, у кого дневной слот НЕ пуст (для очистки в «Утро»)."""
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    col_idx = _day_col(date) - 1
+    active = get_employees(date)
+    val = {}
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) > NAME_COL - 1:
+            nm = r[NAME_COL - 1].strip()
+            val[nm] = r[col_idx].strip() if len(r) > col_idx else ""
+    return [n for n in active if val.get(n, "")]
+
+
+def get_marked_night(date: datetime | None = None) -> list[str]:
+    """Активные, у кого ночной слот = НЧ (для очистки в «Вечер»)."""
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    col_idx = _night_col(date) - 1
+    active = get_employees(date)
+    val = {}
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) > NAME_COL - 1:
+            nm = r[NAME_COL - 1].strip()
+            val[nm] = r[col_idx].strip() if len(r) > col_idx else ""
+    return [n for n in active if val.get(n, "") == DN_NIGHT]
+
+
+def morning_progress(date: datetime | None = None) -> dict:
+    """
+    Состояние утренней отметки:
+      marked  — сколько с непустым дневным слотом
+      unmarked — сколько с пустым
+    Прерванная отметка = marked > 0 И unmarked > 0.
+    """
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    col_idx = _day_col(date) - 1
+    active = set(get_employees(date))
+    marked = unmarked = 0
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) <= NAME_COL - 1:
+            continue
+        nm = r[NAME_COL - 1].strip()
+        if nm not in active:
+            continue
+        v = r[col_idx].strip() if len(r) > col_idx else ""
+        if v:
+            marked += 1
+        else:
+            unmarked += 1
+    return {"marked": marked, "unmarked": unmarked,
+            "interrupted": marked > 0 and unmarked > 0}
 
 
 def get_night_rest(date: datetime | None = None) -> list[str]:
