@@ -267,21 +267,17 @@ async def cb_fire_confirm(event: MessageCallback):
         return
     await event.message.answer(f"⚫ {name} уволен с {day:02d}.{datetime.now().month:02d}.")
 
-    # 2. Формируем Excel-график
+    # 2. Формируем Excel-график (для будущей отправки на почту)
     safe = "".join(ch for ch in name if ch.isalnum() or ch in " _-").strip().replace(" ", "_")
     out_path = f"/tmp/Otchet_{safe}.xlsx"
     path = await asyncio.to_thread(sheets.build_work_report, name, out_path)
     if path:
         await event.message.answer(
-            "Файл с графиком работы сформирован. "
-            "⚠️ Почта пока не подключена — отправьте бухгалтеру вручную."
+            "График работы сформирован и готов к отправке бухгалтеру "
+            "(почта будет подключена позже)."
         )
-        try:
-            await bot.send_file(chat_id=event.message.recipient.chat_id, path=path)
-        except Exception:
-            await event.message.answer("(Не удалось прикрепить файл в MAX — добавим отправку позже.)")
     else:
-        await event.message.answer("График пуст — сотрудник не имеет отметок.")
+        await event.message.answer("График пуст — у сотрудника нет отметок.")
 
 
 @dp.message_callback(F.callback.payload == "firecancel")
