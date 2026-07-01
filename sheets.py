@@ -185,3 +185,23 @@ def set_status(emp_index: int, code: str, date: datetime | None = None):
     ws.update_cell(row, col, code)
     name = ws.cell(row, NAME_COL).value
     return name, code
+
+
+def day_summary(date: datetime | None = None) -> dict:
+    """
+    Сводка за день: сколько каждого кода + поимённый список отсутствующих.
+    Отсутствующими считаем всех, кроме явки (Я) и выходного (В).
+    Возвращает: {"counts": {код: N}, "absent": [(ФИО, код), ...], "total": N}
+    """
+    date = date or datetime.now()
+    names = get_employees(date)
+    values = read_day(date)
+
+    counts = {c: 0 for c in ALL_CODES}
+    absent = []
+    for name, val in zip(names, values):
+        if val in counts:
+            counts[val] += 1
+        if val in (CODE_ABSENT, CODE_SICK, CODE_VACATION):
+            absent.append((name, val))
+    return {"counts": counts, "absent": absent, "total": len(names)}
