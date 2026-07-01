@@ -116,8 +116,11 @@ _clear_e = {"page": 0}
 
 
 async def _edit_or_send(event_or_target, text, markup=None):
-    """Редактирует сообщение (метод edit), при неудаче шлёт новое."""
-    attachments = [markup] if markup else None
+    """
+    Редактирует сообщение (метод edit), при неудаче шлёт новое.
+    markup=None — клавиатуру не трогаем; пустой markup — убираем кнопки.
+    """
+    attachments = [markup] if markup is not None else None
     msg = getattr(event_or_target, "message", event_or_target)
 
     candidates = []
@@ -128,7 +131,7 @@ async def _edit_or_send(event_or_target, text, markup=None):
 
     for obj, fn in candidates:
         try:
-            if attachments:
+            if attachments is not None:
                 await fn(text, attachments=attachments)
             else:
                 await fn(text)
@@ -136,7 +139,7 @@ async def _edit_or_send(event_or_target, text, markup=None):
         except Exception as e:
             log.warning("edit failed: %s", e)
 
-    if attachments:
+    if attachments is not None:
         await msg.answer(text, attachments=attachments)
     else:
         await msg.answer(text)
@@ -288,8 +291,9 @@ async def _send_reason_list(target, edit_event=None, page: int = 0):
     remaining = await asyncio.to_thread(sheets.get_unmarked_day)
     if not remaining:
         txt = "Причины проставлены всем. Утро завершено."
+        empty_kb = InlineKeyboardBuilder().as_markup()
         if edit_event is not None:
-            await _edit_or_send(edit_event, txt)
+            await _edit_or_send(edit_event, txt, empty_kb)
         else:
             await target.answer(txt)
         return
