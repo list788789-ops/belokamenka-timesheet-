@@ -11,6 +11,7 @@
 import calendar
 import json
 import os
+import time
 from datetime import datetime
 
 import gspread
@@ -68,12 +69,22 @@ def _credentials():
     return Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
 
 
+_cached_client = None
+_cached_spreadsheet = None
+
+
 def _client():
-    return gspread.authorize(_credentials())
+    global _cached_client
+    if _cached_client is None:
+        _cached_client = gspread.authorize(_credentials())
+    return _cached_client
 
 
 def _open():
-    return _client().open_by_key(SPREADSHEET_ID)
+    global _cached_spreadsheet
+    if _cached_spreadsheet is None:
+        _cached_spreadsheet = _client().open_by_key(SPREADSHEET_ID)
+    return _cached_spreadsheet
 
 
 def _worksheet_for(date: datetime):
@@ -176,12 +187,20 @@ def _all_month_names(date: datetime | None = None) -> list[str]:
     return names[FIRST_DATA_ROW - 1:]
 
 
-def get_status_list() -> list[dict]:
+_status_cache = {"data": None, "ts": 0}
+_STATUS_TTL = 30  # секунд
+
+
+def get_status_list(force: bool = False) -> list[dict]:
     """
-    Читает лист «Сотрудники».
+    Читает лист «Сотрудники» (с кэшем на 30 сек).
     Возвращает список {"name", "status", "fired_date"} по порядку.
-    Если листа нет — пустой список (значит работаем по старинке).
+    Если листа нет — пустой список.
     """
+    now = time.time()
+    if not force and _status_cache["data"] is not None \
+            and now - _status_cache["ts"] < _STATUS_TTL:
+        return _status_cache["data"]
     try:
         ws = _open().worksheet(EMP_SHEET)
     except Exception:
@@ -195,6 +214,8 @@ def get_status_list() -> list[dict]:
                 "status": (r[2].strip() if len(r) > 2 else EMP_STATUS_ACTIVE),
                 "fired_date": (r[3].strip() if len(r) > 3 else ""),
             })
+    _status_cache["data"] = result
+    _status_cache["ts"] = now
     return result
 
 
@@ -253,20 +274,25 @@ def set_status(emp_index: int, code: str, date: datetime | None = None):
 
 def day_summary(date: datetime | None = None) -> dict:
     """
-    Сводка за день по активным сотрудникам:
-    сколько каждого кода + поимённый список отсутствующих.
-    Читает значение каждого активного по его строке (по ФИО).
+    Сводка за день по активным сотрудникам.
+    Одним запросом читает весь лист месяца, считает в памяти.
     """
     date = date or datetime.now()
-    active = get_employees(date)
+    active = set(get_employees(date))  # активные ФИО
     ws = _worksheet_for(date)
-    col = _day_column(date)
+    grid = ws.get_all_values()  # ОДИН запрос на весь лист
 
+    day_col_idx = _day_column(date) - 1  # 0-based
     counts = {c: 0 for c in ALL_CODES}
     absent = []
-    for name in active:
-        row = _row_by_name(ws, name)
-        val = ws.cell(row, col).value if row else None
+
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) < NAME_COL:
+            continue
+        name = r[NAME_COL - 1].strip()
+        if not name or name not in active:
+            continue
+        val = r[day_col_idx].strip() if len(r) > day_col_idx else ""
         if val in counts:
             counts[val] += 1
         if val in (CODE_ABSENT, CODE_SICK, CODE_VACATION):
