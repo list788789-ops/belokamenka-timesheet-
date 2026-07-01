@@ -280,10 +280,11 @@ async def cb_morning_done(event: MessageCallback):
     """Присутствующие отмечены — переходим к причинам для оставшихся."""
     remaining = await asyncio.to_thread(sheets.get_unmarked_day)
     if not remaining:
-        await event.message.answer("Все отмечены. Утро завершено.")
+        await _edit_or_send(event, "Все отмечены. Утро завершено.",
+                            InlineKeyboardBuilder().as_markup())
         return
     _morning["reason_mode"] = True
-    await _send_reason_list(event.message)
+    await _send_reason_list(event.message, edit_event=event)
 
 
 async def _send_reason_list(target, edit_event=None, page: int = 0):
@@ -346,7 +347,8 @@ async def cb_reason_finish(event: MessageCallback):
 @dp.message_callback(F.callback.payload == "rsnfinish_yes")
 async def cb_reason_finish_yes(event: MessageCallback):
     n = await asyncio.to_thread(sheets.fill_unmarked_absent)
-    await _edit_or_send(event, f"Утро завершено. Неявка проставлена: {n} чел.")
+    await _edit_or_send(event, f"Утро завершено. Неявка проставлена: {n} чел.",
+                        InlineKeyboardBuilder().as_markup())
 
 
 @dp.message_callback(F.callback.payload == "rsnfinish_no")
@@ -482,7 +484,8 @@ async def cb_mark_night(event: MessageCallback):
 
 @dp.message_callback(F.callback.payload == "edone")
 async def cb_evening_done(event: MessageCallback):
-    await event.message.answer("🌙 Вечерняя отметка завершена.")
+    await _edit_or_send(event, "🌙 Вечерняя отметка завершена.",
+                        InlineKeyboardBuilder().as_markup())
 
 
 # ================= УВОЛЬНЕНИЕ =================
@@ -526,12 +529,13 @@ async def cb_menu_clearall(event: MessageCallback):
 @dp.message_callback(F.callback.payload == "clearall_yes")
 async def cb_clearall_yes(event: MessageCallback):
     n = await asyncio.to_thread(sheets.clear_all_day)
-    await _edit_or_send(event, f"🧹 Очищено за сегодня: {n} сотрудников (день+ночь).")
+    empty_kb = InlineKeyboardBuilder().as_markup()
+    await _edit_or_send(event, f"🧹 Очищено за сегодня: {n} сотрудников (день+ночь).", empty_kb)
 
 
 @dp.message_callback(F.callback.payload == "clearall_no")
 async def cb_clearall_no(event: MessageCallback):
-    await _edit_or_send(event, "Отменено.")
+    await _edit_or_send(event, "Отменено.", InlineKeyboardBuilder().as_markup())
 
 
 async def _send_fire_list(target, page: int):
