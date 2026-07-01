@@ -24,6 +24,7 @@ from setup_dropdowns import setup_dropdowns
 from reorganize import reorganize
 from employees_sheet import create_employees_sheet
 from rebuild_daynight import rebuild_daynight
+from refresh_validation import refresh_validation
 
 from maxapi import Bot, Dispatcher, F
 from maxapi.types import MessageCreated, BotStarted, Command, MessageCallback, CallbackButton
@@ -128,6 +129,7 @@ async def _send_morning_list(target, page: int):
         nav.append(CallbackButton(text="▲ Назад", payload=f"mpage:{page - 1}"))
     if nav:
         kb.row(*nav)
+    kb.row(CallbackButton(text="🧹 Очистить сотрудника", payload="mclear"))
     kb.row(CallbackButton(text="✅ Отметил всех присутствующих", payload="mdone"))
     txt = f"☀️ Утро. Отметьте, кто на месте (осталось {total}):"
     await target.answer(txt, attachments=[kb.as_markup()])
@@ -139,15 +141,68 @@ async def cb_menu_morning(event: MessageCallback):
         return
     _morning["page"] = 0
     _morning["reason_mode"] = False
-    # 1. Автоотдых тем, кто с ночи
+
+    # Проверка прерванной отметки
+    prog = await asyncio.to_thread(sheets.morning_progress)
+    if prog["interrupted"]:
+        kb = InlineKeyboardBuilder()
+        kb.row(
+            CallbackButton(text="▶️ Продолжить", payload="mcontinue"),
+            CallbackButton(text="🔄 Начать заново", payload="mrestart"),
+        )
+        await event.message.answer(
+            f"Отметка за сегодня не завершена: отмечено {prog['marked']}, "
+            f"осталось {prog['unmarked']}. Продолжить?",
+            attachments=[kb.as_markup()])
+        return
+
+    await _morning_start(event.message)
+
+
+async def _morning_start(target):
+    """Начало утренней отметки: автоотдых с ночи + список."""
     rest_names = await asyncio.to_thread(sheets.get_night_rest)
     for nm in rest_names:
         await asyncio.to_thread(sheets.set_rest, nm)
     if rest_names:
-        await event.message.answer("С ночи отдыхают (проставлен отдых):\n" +
-                                   "\n".join(f"  😴 {n}" for n in rest_names))
-    # 2. Список для отметки присутствующих
+        await target.answer("С ночи отдыхают (проставлен отдых):\n" +
+                            "\n".join(f"  😴 {n}" for n in rest_names))
+    await _send_morning_list(target, 0)
+
+
+@dp.message_callback(F.callback.payload == "mcontinue")
+async def cb_morning_continue(event: MessageCallback):
+    _morning["page"] = 0
     await _send_morning_list(event.message, 0)
+
+
+@dp.message_callback(F.callback.payload == "mrestart")
+async def cb_morning_restart(event: MessageCallback):
+    _morning["page"] = 0
+    await _morning_start(event.message)
+
+
+@dp.message_callback(F.callback.payload == "mclear")
+async def cb_morning_clear_list(event: MessageCallback):
+    """Список отмеченных днём для очистки."""
+    marked = await asyncio.to_thread(sheets.get_marked_day)
+    if not marked:
+        await event.message.answer("Пока некого очищать.")
+        return
+    kb = InlineKeyboardBuilder()
+    for name in marked[:PAGE_SIZE]:
+        kb.row(CallbackButton(text=name, payload=f"mclr:{name}"))
+    kb.row(CallbackButton(text="◀ К отметке", payload="mpage:0"))
+    await event.message.answer("Кого очистить (дневной слот)?",
+                               attachments=[kb.as_markup()])
+
+
+@dp.message_callback(F.callback.payload.startswith("mclr:"))
+async def cb_morning_clear_do(event: MessageCallback):
+    name = event.callback.payload.split(":", 1)[1]
+    await asyncio.to_thread(sheets.clear_day_slot, name)
+    await event.message.answer(f"🧹 {name} — дневной слот очищен.")
+    await _send_morning_list(event.message, _morning["page"])
 
 
 @dp.message_callback(F.callback.payload.startswith("mpage:"))
@@ -198,7 +253,10 @@ async def cb_pick_reason(event: MessageCallback):
         CallbackButton(text="❌ Неявка", payload=f"setrsn:{name}:{sheets.DN_ABSENT}"),
         CallbackButton(text="🤒 Больничный", payload=f"setrsn:{name}:{sheets.DN_SICK}"),
     )
-    kb.row(CallbackButton(text="✈️ Межвахта", payload=f"setrsn:{name}:{sheets.DN_ROTATION}"))
+    kb.row(
+        CallbackButton(text="✈️ Межвахта", payload=f"setrsn:{name}:{sheets.DN_ROTATION}"),
+        CallbackButton(text="📋 Мигр.учёт", payload=f"setrsn:{name}:{sheets.DN_MIGR}"),
+    )
     await event.message.answer(f"{name} — причина?", attachments=[kb.as_markup()])
 
 
@@ -239,10 +297,34 @@ async def _send_evening_list(target, page: int):
         nav.append(CallbackButton(text="▲ Назад", payload=f"epage:{page - 1}"))
     if nav:
         kb.row(*nav)
+    kb.row(CallbackButton(text="🧹 Очистить сотрудника", payload="eclear"))
     kb.row(CallbackButton(text="✅ Готово", payload="edone"))
     await target.answer(
         f"🌙 Вечер. Кто заступает в ночь? (доступно {total})",
         attachments=[kb.as_markup()])
+
+
+@dp.message_callback(F.callback.payload == "eclear")
+async def cb_evening_clear_list(event: MessageCallback):
+    """Список отмеченных в ночь для очистки."""
+    marked = await asyncio.to_thread(sheets.get_marked_night)
+    if not marked:
+        await event.message.answer("Пока некого очищать.")
+        return
+    kb = InlineKeyboardBuilder()
+    for name in marked[:PAGE_SIZE]:
+        kb.row(CallbackButton(text=name, payload=f"eclr:{name}"))
+    kb.row(CallbackButton(text="◀ К отметке", payload="epage:0"))
+    await event.message.answer("Кого очистить (ночной слот)?",
+                               attachments=[kb.as_markup()])
+
+
+@dp.message_callback(F.callback.payload.startswith("eclr:"))
+async def cb_evening_clear_do(event: MessageCallback):
+    name = event.callback.payload.split(":", 1)[1]
+    await asyncio.to_thread(sheets.clear_night_slot, name)
+    await event.message.answer(f"🧹 {name} — ночной слот очищен.")
+    await _send_evening_list(event.message, _evening["page"])
 
 
 @dp.message_callback(F.callback.payload == "menu:evening")
@@ -456,6 +538,13 @@ async def main():
             log.info("Выпадающие списки настроены на %s листах.", n)
         except Exception as e:
             log.exception("Ошибка настройки списков: %s", e)
+
+    if os.getenv("RUN_REFRESH_DV") == "1":
+        try:
+            n = await asyncio.to_thread(refresh_validation)
+            log.info("Выпадающие списки обновлены (МУ) на 12 листах.")
+        except Exception as e:
+            log.exception("Ошибка обновления списков: %s", e)
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(rotation_reminders_job, CronTrigger(hour=9, minute=0))
