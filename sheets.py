@@ -47,6 +47,11 @@ NUM_COL = 1           # столбец A = №
 NAME_COL = 2          # столбец B = ФИО
 FIRST_DAY_COL = 3     # столбец C = день 1
 
+# Лист-справочник сотрудников
+EMP_SHEET = "Сотрудники"
+EMP_STATUS_ACTIVE = "активен"
+EMP_STATUS_FIRED = "уволен"
+
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
@@ -163,45 +168,107 @@ def clear_day(date: datetime | None = None):
     return n
 
 
-def get_employees(date: datetime | None = None) -> list[str]:
-    """Список ФИО с листа текущего месяца."""
+def _all_month_names(date: datetime | None = None) -> list[str]:
+    """Все ФИО из листа месяца (по порядку строк)."""
     date = date or datetime.now()
     ws = _worksheet_for(date)
     names = ws.col_values(NAME_COL)
-    return names[FIRST_DATA_ROW - 1:]  # с третьей строки
+    return names[FIRST_DATA_ROW - 1:]
+
+
+def get_status_list() -> list[dict]:
+    """
+    Читает лист «Сотрудники».
+    Возвращает список {"name", "status", "fired_date"} по порядку.
+    Если листа нет — пустой список (значит работаем по старинке).
+    """
+    try:
+        ws = _open().worksheet(EMP_SHEET)
+    except Exception:
+        return []
+    rows = ws.get_all_values()[1:]  # без шапки
+    result = []
+    for r in rows:
+        if len(r) >= 2 and r[1].strip():
+            result.append({
+                "name": r[1].strip(),
+                "status": (r[2].strip() if len(r) > 2 else EMP_STATUS_ACTIVE),
+                "fired_date": (r[3].strip() if len(r) > 3 else ""),
+            })
+    return result
+
+
+def get_employees(date: datetime | None = None) -> list[str]:
+    """
+    Список ФИО активных сотрудников.
+    Если есть лист «Сотрудники» — берём только активных оттуда.
+    Иначе — все из листа месяца (обратная совместимость).
+    """
+    status = get_status_list()
+    if status:
+        return [e["name"] for e in status if e["status"] == EMP_STATUS_ACTIVE]
+    return _all_month_names(date)
+
+
+def get_fired() -> list[dict]:
+    """Список уволенных: [{"name", "fired_date"}, ...]."""
+    return [
+        {"name": e["name"], "fired_date": e["fired_date"]}
+        for e in get_status_list()
+        if e["status"] == EMP_STATUS_FIRED
+    ]
+
+
+def _row_by_name(ws, name: str) -> int | None:
+    """Находит номер строки сотрудника в листе месяца по ФИО."""
+    names = ws.col_values(NAME_COL)
+    for i, n in enumerate(names):
+        if i >= FIRST_DATA_ROW - 1 and n.strip() == name.strip():
+            return i + 1  # gspread 1-based
+    return None
 
 
 def set_status(emp_index: int, code: str, date: datetime | None = None):
     """
-    Ставит статус конкретному сотруднику за конкретный день.
-    emp_index — порядковый номер сотрудника (0-based, как в get_employees).
-    code — один из ALL_CODES.
-    Возвращает (ФИО, код) для подтверждения.
+    Ставит статус сотруднику за конкретный день.
+    emp_index — индекс в списке get_employees() (активные).
+    Запись идёт по ФИО (поиск строки в листе месяца), чтобы уволенные
+    не сдвигали адресацию.
+    Возвращает (ФИО, код).
     """
     date = date or datetime.now()
+    active = get_employees(date)
+    if emp_index >= len(active):
+        return None, code
+    name = active[emp_index]
+
     ws = _worksheet_for(date)
+    row = _row_by_name(ws, name)
+    if row is None:
+        return name, code
     col = _day_column(date)
-    row = FIRST_DATA_ROW + emp_index
     ws.update_cell(row, col, code)
-    name = ws.cell(row, NAME_COL).value
     return name, code
 
 
 def day_summary(date: datetime | None = None) -> dict:
     """
-    Сводка за день: сколько каждого кода + поимённый список отсутствующих.
-    Отсутствующими считаем всех, кроме явки (Я) и выходного (В).
-    Возвращает: {"counts": {код: N}, "absent": [(ФИО, код), ...], "total": N}
+    Сводка за день по активным сотрудникам:
+    сколько каждого кода + поимённый список отсутствующих.
+    Читает значение каждого активного по его строке (по ФИО).
     """
     date = date or datetime.now()
-    names = get_employees(date)
-    values = read_day(date)
+    active = get_employees(date)
+    ws = _worksheet_for(date)
+    col = _day_column(date)
 
     counts = {c: 0 for c in ALL_CODES}
     absent = []
-    for name, val in zip(names, values):
+    for name in active:
+        row = _row_by_name(ws, name)
+        val = ws.cell(row, col).value if row else None
         if val in counts:
             counts[val] += 1
         if val in (CODE_ABSENT, CODE_SICK, CODE_VACATION):
             absent.append((name, val))
-    return {"counts": counts, "absent": absent, "total": len(names)}
+    return {"counts": counts, "absent": absent, "total": len(active)}
