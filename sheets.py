@@ -103,9 +103,15 @@ def _open():
     return _cached_spreadsheet
 
 
+_ws_cache = {}
+
+
 def _worksheet_for(date: datetime):
-    """Лист, соответствующий месяцу даты."""
-    return _open().worksheet(MONTHS_RU[date.month - 1])
+    """Лист месяца (кэшируется по названию, чтобы не читать метаданные книги)."""
+    title = MONTHS_RU[date.month - 1]
+    if title not in _ws_cache:
+        _ws_cache[title] = _open().worksheet(title)
+    return _ws_cache[title]
 
 
 def _day_col(date: datetime) -> int:
@@ -130,11 +136,38 @@ def _employee_count(ws) -> int:
     return max(0, len(names) - (FIRST_DATA_ROW - 1))
 
 
+_grid_cache = {"data": None, "ts": 0, "sheet": None}
+_GRID_TTL = 15  # секунд
+
+
 def _read_grid(date: datetime | None = None):
-    """Читает весь лист месяца одним запросом. Возвращает (ws, grid)."""
+    """
+    Читает весь лист месяца (кэш 15 сек). Возвращает (ws, grid).
+    При отметках кэш обновляется локально через _grid_set.
+    """
     date = date or datetime.now()
     ws = _worksheet_for(date)
-    return ws, ws.get_all_values()
+    now = time.time()
+    if (_grid_cache["sheet"] != ws.title
+            or now - _grid_cache["ts"] > _GRID_TTL
+            or _grid_cache["data"] is None):
+        _grid_cache["data"] = ws.get_all_values()
+        _grid_cache["ts"] = now
+        _grid_cache["sheet"] = ws.title
+    return ws, _grid_cache["data"]
+
+
+def _grid_set(ws, row: int, col: int, value: str):
+    """Локально обновляет кэш grid после записи ячейки (row/col 1-based)."""
+    if _grid_cache["sheet"] != ws.title or _grid_cache["data"] is None:
+        return
+    grid = _grid_cache["data"]
+    ri, ci = row - 1, col - 1
+    while len(grid) <= ri:
+        grid.append([])
+    while len(grid[ri]) <= ci:
+        grid[ri].append("")
+    grid[ri][ci] = value
 
 
 def mark_day(name: str, date: datetime | None = None) -> bool:
@@ -144,7 +177,9 @@ def mark_day(name: str, date: datetime | None = None) -> bool:
     row = _row_by_name(ws, name)
     if row is None:
         return False
-    ws.update_cell(row, _day_col(date), DN_DAY)
+    col = _day_col(date)
+    ws.update_cell(row, col, DN_DAY)
+    _grid_set(ws, row, col, DN_DAY)
     return True
 
 
@@ -155,9 +190,11 @@ def mark_night(name: str, date: datetime | None = None) -> bool:
     row = _row_by_name(ws, name)
     if row is None:
         return False
-    # батчем два слота
-    ws.update_cell(row, _day_col(date), DN_REST)
-    ws.update_cell(row, _night_col(date), DN_NIGHT)
+    dcol, ncol = _day_col(date), _night_col(date)
+    ws.update_cell(row, dcol, DN_REST)
+    ws.update_cell(row, ncol, DN_NIGHT)
+    _grid_set(ws, row, dcol, DN_REST)
+    _grid_set(ws, row, ncol, DN_NIGHT)
     return True
 
 
@@ -168,7 +205,9 @@ def set_reason(name: str, code: str, date: datetime | None = None) -> bool:
     row = _row_by_name(ws, name)
     if row is None:
         return False
-    ws.update_cell(row, _day_col(date), code)
+    col = _day_col(date)
+    ws.update_cell(row, col, code)
+    _grid_set(ws, row, col, code)
     return True
 
 
@@ -179,7 +218,9 @@ def set_rest(name: str, date: datetime | None = None) -> bool:
     row = _row_by_name(ws, name)
     if row is None:
         return False
-    ws.update_cell(row, _day_col(date), DN_REST)
+    col = _day_col(date)
+    ws.update_cell(row, col, DN_REST)
+    _grid_set(ws, row, col, DN_REST)
     return True
 
 
@@ -310,13 +351,28 @@ def get_fired() -> list[dict]:
     ]
 
 
+_rowmap_cache = {"data": {}, "ts": 0, "sheet": None}
+_ROWMAP_TTL = 60  # секунд
+
+
 def _row_by_name(ws, name: str) -> int | None:
-    """Находит номер строки сотрудника в листе месяца по ФИО."""
-    names = ws.col_values(NAME_COL)
-    for i, n in enumerate(names):
-        if i >= FIRST_DATA_ROW - 1 and n.strip() == name.strip():
-            return i + 1  # gspread 1-based
-    return None
+    """
+    Номер строки сотрудника по ФИО. Карта ФИО→строка кэшируется на 60 сек
+    для листа, чтобы не читать столбец на каждый тап.
+    """
+    now = time.time()
+    if (_rowmap_cache["sheet"] != ws.title
+            or now - _rowmap_cache["ts"] > _ROWMAP_TTL
+            or not _rowmap_cache["data"]):
+        names = ws.col_values(NAME_COL)
+        m = {}
+        for i, n in enumerate(names):
+            if i >= FIRST_DATA_ROW - 1 and n.strip():
+                m[n.strip()] = i + 1
+        _rowmap_cache["data"] = m
+        _rowmap_cache["ts"] = now
+        _rowmap_cache["sheet"] = ws.title
+    return _rowmap_cache["data"].get(name.strip())
 
 
 def set_rotation_return(name: str, return_date: str) -> bool:
