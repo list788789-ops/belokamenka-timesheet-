@@ -17,7 +17,7 @@ from sheets import (
 YEAR = 2026
 
 
-def main():
+def setup_dropdowns():
     service = build("sheets", "v4", credentials=_credentials())
 
     # Получаем метаданные: sheetId для каждого листа-месяца
@@ -67,7 +67,8 @@ def main():
     ).execute()
     print(f"Выпадающие списки добавлены на {len(requests)} листах "
           f"({n_emp} сотрудников).")
+    return len(requests)
 
 
 if __name__ == "__main__":
-    main()
+    setup_dropdowns()
