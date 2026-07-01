@@ -129,12 +129,28 @@ async def confirm_no(event: MessageCreated):
         await event.message.answer("Сейчас нет активного запроса на подтверждение.")
 
 
+def _main_menu():
+    """Стартовое меню бригадира."""
+    kb = InlineKeyboardBuilder()
+    kb.row(CallbackButton(text="📝 Отметить отсутствующих", payload="menu:mark"))
+    kb.row(CallbackButton(text="📅 Табель за сегодня", payload="menu:today"))
+    kb.row(CallbackButton(text="🚪 Оформить увольнение", payload="menu:fire"))
+    kb.row(CallbackButton(text="📋 Список уволенных", payload="menu:fired"))
+    return kb.as_markup()
+
+
 @dp.bot_started()
 async def on_bot_started(event: BotStarted):
     await bot.send_message(
         chat_id=event.chat_id,
-        text="Бот табеля запущен. Команды: /chatid — узнать id чата.",
+        text="Бот табеля. Выберите действие:",
+        attachments=[_main_menu()],
     )
+
+
+@dp.message_created(Command("menu"))
+async def show_menu(event: MessageCreated):
+    await event.message.answer("Выберите действие:", attachments=[_main_menu()])
 
 
 @dp.message_created(Command("chatid"))
@@ -142,6 +158,42 @@ async def show_chat_id(event: MessageCreated):
     """Утилита: узнать chat_id (для настройки FOREMAN_CHAT_ID)."""
     chat_id = event.message.recipient.chat_id
     await event.message.answer(f"chat_id этого чата: {chat_id}")
+
+
+@dp.message_callback(F.callback.payload == "menu:today")
+async def cb_today(event: MessageCallback):
+    s = await asyncio.to_thread(sheets.day_summary)
+    c = s["counts"]
+    lines = [
+        f"Табель за {_day_label(datetime.now().day)}:",
+        f"Явка: {c.get('Я', 0)}   Неявка: {c.get('Н', 0)}   "
+        f"Больничный: {c.get('Б', 0)}   Отпуск: {c.get('О', 0)}   "
+        f"Выходной: {c.get('В', 0)}",
+    ]
+    if s["absent"]:
+        lines.append("\nОтсутствуют:")
+        for name, code in s["absent"]:
+            lines.append(f"  • {name} — {code}")
+    else:
+        lines.append("\nВсе на месте.")
+    await event.message.answer("\n".join(lines))
+
+
+@dp.message_callback(F.callback.payload == "menu:mark")
+async def cb_menu_mark(event: MessageCallback):
+    _mark_session["day"] = datetime.now().day
+    _mark_session["page"] = 0
+    await _send_employee_list(event.message, _mark_session["day"], 0)
+
+
+@dp.message_callback(F.callback.payload == "menu:fire")
+async def cb_menu_fire(event: MessageCallback):
+    await event.message.answer("Оформление увольнения — в разработке.")
+
+
+@dp.message_callback(F.callback.payload == "menu:fired")
+async def cb_menu_fired(event: MessageCallback):
+    await event.message.answer("Список уволенных — в разработке.")
 
 
 # ============ Отметка отсутствующих кнопками ============
