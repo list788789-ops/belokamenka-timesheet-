@@ -110,34 +110,49 @@ async def cb_today(event: MessageCallback):
 # ================= УТРО =================
 # Сессия утренней отметки
 _morning = {"page": 0, "reason_mode": False}
+_clear_m = {"page": 0}
+_clear_e = {"page": 0}
+
+
+_edit_diag_done = False
 
 
 async def _edit_or_send(event_or_target, text, markup=None):
     """
     Пытается отредактировать сообщение (callback), иначе шлёт новое.
-    event_or_target — либо MessageCallback (есть .message + правка),
-    либо объект message (метод .answer).
+    При первом вызове логирует доступные методы (диагностика).
     """
+    global _edit_diag_done
     attachments = [markup] if markup else None
-    # Попытка редактирования (для callback-событий)
     msg = getattr(event_or_target, "message", event_or_target)
-    for method in ("edit", "edit_text", "edit_message"):
-        fn = getattr(msg, method, None)
-        if callable(fn):
-            try:
-                if attachments:
-                    await fn(text, attachments=attachments)
-                else:
-                    await fn(text)
-                return
-            except TypeError:
-                try:
-                    await fn(text)
-                    return
-                except Exception:
-                    pass
-            except Exception:
-                pass
+
+    # ДИАГНОСТИКА (один раз): какие методы есть у event и у message
+    if not _edit_diag_done:
+        _edit_diag_done = True
+        ev_methods = [m for m in dir(event_or_target) if not m.startswith("__")]
+        msg_methods = [m for m in dir(msg) if not m.startswith("__")]
+        log.info("DIAG event(%s) methods: %s", type(event_or_target).__name__, ev_methods)
+        log.info("DIAG message(%s) methods: %s", type(msg).__name__, msg_methods)
+
+    # Пробуем правку на самом event (у callback часто там), потом на message
+    candidates = []
+    for obj in (event_or_target, msg):
+        for method in ("edit", "edit_text", "edit_message", "answer_edit"):
+            fn = getattr(obj, method, None)
+            if callable(fn):
+                candidates.append((obj, method, fn))
+
+    for obj, method, fn in candidates:
+        try:
+            if attachments:
+                await fn(text, attachments=attachments)
+            else:
+                await fn(text)
+            return
+        except Exception as e:
+            log.warning("edit method %s.%s failed: %s",
+                        type(obj).__name__, method, e)
+
     # Фолбэк — новое сообщение
     if attachments:
         await msg.answer(text, attachments=attachments)
@@ -220,24 +235,45 @@ async def cb_morning_restart(event: MessageCallback):
 
 @dp.message_callback(F.callback.payload == "mclear")
 async def cb_morning_clear_list(event: MessageCallback):
-    """Список отмеченных днём для очистки."""
+    _clear_m["page"] = 0
+    await _send_morning_clear_list(event, 0)
+
+
+async def _send_morning_clear_list(event, page: int):
     marked = await asyncio.to_thread(sheets.get_marked_day)
     if not marked:
-        await event.message.answer("Пока некого очищать.")
+        await _edit_or_send(event, "Пока некого очищать.")
         return
+    total = len(marked)
+    start = page * PAGE_SIZE
+    chunk = marked[start:start + PAGE_SIZE]
     kb = InlineKeyboardBuilder()
-    for name in marked[:PAGE_SIZE]:
+    for name in chunk:
         kb.row(CallbackButton(text=name, payload=f"mclr:{name}"))
+    nav = []
+    if start + PAGE_SIZE < total:
+        nav.append(CallbackButton(text="Ещё ▼", payload=f"mclrpage:{page + 1}"))
+    if page > 0:
+        nav.append(CallbackButton(text="▲ Назад", payload=f"mclrpage:{page - 1}"))
+    if nav:
+        kb.row(*nav)
     kb.row(CallbackButton(text="◀ К отметке", payload="mpage:0"))
-    await event.message.answer("Кого очистить (дневной слот)?",
-                               attachments=[kb.as_markup()])
+    await _edit_or_send(event, f"Кого очистить (дневной слот)? Всего: {total}",
+                        kb.as_markup())
+
+
+@dp.message_callback(F.callback.payload.startswith("mclrpage:"))
+async def cb_morning_clear_page(event: MessageCallback):
+    page = int(event.callback.payload.split(":")[1])
+    _clear_m["page"] = page
+    await _send_morning_clear_list(event, page)
 
 
 @dp.message_callback(F.callback.payload.startswith("mclr:"))
 async def cb_morning_clear_do(event: MessageCallback):
     name = event.callback.payload.split(":", 1)[1]
     await asyncio.to_thread(sheets.clear_day_slot, name)
-    await _send_morning_list(event.message, _morning["page"], edit_event=event)
+    await _send_morning_clear_list(event, _clear_m["page"])
 
 
 @dp.message_callback(F.callback.payload.startswith("mpage:"))
@@ -349,23 +385,45 @@ async def _send_evening_list(target, page: int, edit_event=None):
 
 @dp.message_callback(F.callback.payload == "eclear")
 async def cb_evening_clear_list(event: MessageCallback):
-    """Список отмеченных в ночь для очистки."""
+    _clear_e["page"] = 0
+    await _send_evening_clear_list(event, 0)
+
+
+async def _send_evening_clear_list(event, page: int):
     marked = await asyncio.to_thread(sheets.get_marked_night)
     if not marked:
-        await event.message.answer("Пока некого очищать.")
+        await _edit_or_send(event, "Пока некого очищать.")
         return
+    total = len(marked)
+    start = page * PAGE_SIZE
+    chunk = marked[start:start + PAGE_SIZE]
     kb = InlineKeyboardBuilder()
-    for name in marked[:PAGE_SIZE]:
+    for name in chunk:
         kb.row(CallbackButton(text=name, payload=f"eclr:{name}"))
+    nav = []
+    if start + PAGE_SIZE < total:
+        nav.append(CallbackButton(text="Ещё ▼", payload=f"eclrpage:{page + 1}"))
+    if page > 0:
+        nav.append(CallbackButton(text="▲ Назад", payload=f"eclrpage:{page - 1}"))
+    if nav:
+        kb.row(*nav)
     kb.row(CallbackButton(text="◀ К отметке", payload="epage:0"))
-    await _edit_or_send(event, "Кого очистить (ночной слот)?", kb.as_markup())
+    await _edit_or_send(event, f"Кого очистить (ночной слот)? Всего: {total}",
+                        kb.as_markup())
+
+
+@dp.message_callback(F.callback.payload.startswith("eclrpage:"))
+async def cb_evening_clear_page(event: MessageCallback):
+    page = int(event.callback.payload.split(":")[1])
+    _clear_e["page"] = page
+    await _send_evening_clear_list(event, page)
 
 
 @dp.message_callback(F.callback.payload.startswith("eclr:"))
 async def cb_evening_clear_do(event: MessageCallback):
     name = event.callback.payload.split(":", 1)[1]
     await asyncio.to_thread(sheets.clear_night_slot, name)
-    await _send_evening_list(event.message, _evening["page"], edit_event=event)
+    await _send_evening_clear_list(event, _clear_e["page"])
 
 
 @dp.message_callback(F.callback.payload == "menu:evening")
