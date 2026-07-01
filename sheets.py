@@ -355,6 +355,28 @@ def get_unmarked_day(date: datetime | None = None) -> list[str]:
     return [n for n in active if not present.get(n, "")]
 
 
+def fill_unmarked_absent(date: datetime | None = None) -> int:
+    """
+    Всем активным с пустым дневным слотом ставит Н (неявка).
+    Батч-запись одним запросом. Возвращает число проставленных.
+    """
+    date = date or datetime.now()
+    unmarked = get_unmarked_day(date)
+    if not unmarked:
+        return 0
+    ws = _worksheet_for(date)
+    col = _day_col(date)
+    cells = []
+    for name in unmarked:
+        row = _row_by_name(ws, name)
+        if row:
+            cells.append(gspread.Cell(row, col, DN_ABSENT))
+            _grid_set(ws, row, col, DN_ABSENT)
+    if cells:
+        ws.update_cells(cells)
+    return len(cells)
+
+
 def get_not_worked_day(date: datetime | None = None) -> list[str]:
     """
     Для вечера: активные, кто НЕ работал днём (слот != Д).
