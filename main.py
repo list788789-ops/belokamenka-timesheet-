@@ -21,6 +21,7 @@ from apscheduler.triggers.cron import CronTrigger
 import sheets
 from setup_dropdowns import setup_dropdowns
 from reorganize import reorganize
+from employees_sheet import create_employees_sheet
 
 # --- MAX Bot API (библиотека maxapi, см. requirements.txt) ---
 from maxapi import Bot, Dispatcher, F
@@ -326,6 +327,14 @@ async def on_day_number(event: MessageCreated):
 async def main():
     if not MAX_BOT_TOKEN:
         raise RuntimeError("MAX_BOT_TOKEN не задан в переменных окружения")
+
+    # Разовое создание листа «Сотрудники». Включается RUN_EMPLOYEES=1.
+    if os.getenv("RUN_EMPLOYEES") == "1":
+        try:
+            n = await asyncio.to_thread(create_employees_sheet)
+            log.info("Лист «Сотрудники» создан: %s активных.", n)
+        except Exception as e:
+            log.exception("Ошибка создания листа «Сотрудники»: %s", e)
 
     # Разовая реорганизация: № + сортировка ФИО + сдвиг дней.
     # Включается RUN_REORG=1. После успеха убери переменную.
