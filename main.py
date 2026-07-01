@@ -23,8 +23,9 @@ from setup_dropdowns import setup_dropdowns
 from reorganize import reorganize
 
 # --- MAX Bot API (библиотека maxapi, см. requirements.txt) ---
-from maxapi import Bot, Dispatcher
-from maxapi.types import MessageCreated, BotStarted, Command
+from maxapi import Bot, Dispatcher, F
+from maxapi.types import MessageCreated, BotStarted, Command, MessageCallback, CallbackButton
+from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s — %(levelname)s — %(message)s")
@@ -141,6 +142,131 @@ async def show_chat_id(event: MessageCreated):
     """Утилита: узнать chat_id (для настройки FOREMAN_CHAT_ID)."""
     chat_id = event.message.recipient.chat_id
     await event.message.answer(f"chat_id этого чата: {chat_id}")
+
+
+# ============ Отметка отсутствующих кнопками ============
+# Простое состояние сессии бригадира: выбранный день и страница списка.
+PAGE_SIZE = 10
+_mark_session = {"day": None, "page": 0}
+_STATUS_LABELS = {
+    sheets.CODE_ABSENT: "Н (неявка)",
+    sheets.CODE_SICK: "Б (больничный)",
+    sheets.CODE_VACATION: "О (отпуск)",
+}
+_MONTHS_GEN = [
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+]
+
+
+def _day_label(day: int) -> str:
+    now = datetime.now()
+    return f"{day} {_MONTHS_GEN[now.month - 1]}"
+
+
+async def _send_employee_list(target, day: int, page: int):
+    """Отправляет страницу списка сотрудников с кнопками."""
+    employees = await asyncio.to_thread(sheets.get_employees)
+    total = len(employees)
+    start = page * PAGE_SIZE
+    chunk = employees[start:start + PAGE_SIZE]
+
+    kb = InlineKeyboardBuilder()
+    for i, name in enumerate(chunk, start=start):
+        kb.row(CallbackButton(text=f"{i + 1}. {name}", payload=f"emp:{i}"))
+
+    # Навигация
+    nav = []
+    if start + PAGE_SIZE < total:
+        nav.append(CallbackButton(text="Ещё ▼", payload=f"page:{page + 1}"))
+    if page > 0:
+        nav.append(CallbackButton(text="▲ Назад", payload=f"page:{page - 1}"))
+    if nav:
+        kb.row(*nav)
+    kb.row(CallbackButton(text="📅 Другой день", payload="pickday"))
+    kb.row(CallbackButton(text="✅ Завершить", payload="finish"))
+
+    text = f"Отметка за {_day_label(day)}. Кто отсутствует?"
+    await target.answer(text, attachments=[kb.as_markup()])
+
+
+@dp.message_created(Command("отметить"))
+async def start_marking(event: MessageCreated):
+    if not _is_foreman(event):
+        return
+    _mark_session["day"] = datetime.now().day
+    _mark_session["page"] = 0
+    await _send_employee_list(event.message, _mark_session["day"], 0)
+
+
+def _is_foreman(event) -> bool:
+    """Проверка, что команду шлёт бригадир (по chat_id)."""
+    if not FOREMAN_CHAT_ID:
+        return True  # если не задан — не ограничиваем
+    try:
+        return event.message.recipient.chat_id == FOREMAN_CHAT_ID
+    except Exception:
+        return True
+
+
+@dp.message_callback(F.callback.payload.startswith("page:"))
+async def cb_page(event: MessageCallback):
+    page = int(event.callback.payload.split(":")[1])
+    _mark_session["page"] = page
+    await _send_employee_list(event.message, _mark_session["day"], page)
+
+
+@dp.message_callback(F.callback.payload.startswith("emp:"))
+async def cb_employee(event: MessageCallback):
+    idx = int(event.callback.payload.split(":")[1])
+    employees = await asyncio.to_thread(sheets.get_employees)
+    name = employees[idx] if idx < len(employees) else f"№{idx + 1}"
+
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        CallbackButton(text="Н", payload=f"set:{idx}:{sheets.CODE_ABSENT}"),
+        CallbackButton(text="Б", payload=f"set:{idx}:{sheets.CODE_SICK}"),
+        CallbackButton(text="О", payload=f"set:{idx}:{sheets.CODE_VACATION}"),
+    )
+    kb.row(CallbackButton(text="◀ К списку", payload=f"page:{_mark_session['page']}"))
+    await event.message.answer(f"{name} — какой статус?", attachments=[kb.as_markup()])
+
+
+@dp.message_callback(F.callback.payload.startswith("set:"))
+async def cb_set_status(event: MessageCallback):
+    _, idx_s, code = event.callback.payload.split(":")
+    idx = int(idx_s)
+    day = _mark_session["day"] or datetime.now().day
+    date = datetime.now().replace(day=day)
+    name, _ = await asyncio.to_thread(sheets.set_status, idx, code, date)
+    await event.message.answer(f"✔ {name} — {_STATUS_LABELS.get(code, code)}")
+    # Снова показываем список для следующего
+    await _send_employee_list(event.message, _mark_session["day"], _mark_session["page"])
+
+
+@dp.message_callback(F.callback.payload == "pickday")
+async def cb_pickday(event: MessageCallback):
+    _mark_session["awaiting_day"] = True
+    await event.message.answer("Введите число месяца (например, 15):")
+
+
+@dp.message_callback(F.callback.payload == "finish")
+async def cb_finish(event: MessageCallback):
+    _mark_session["day"] = None
+    _mark_session["page"] = 0
+    await event.message.answer("Готово. Отметка завершена.")
+
+
+@dp.message_created(F.message.body.text.regexp(r"^\d{1,2}$"))
+async def on_day_number(event: MessageCreated):
+    """Приём числа дня после нажатия 'Другой день'."""
+    if not _mark_session.get("awaiting_day"):
+        return
+    day = int(event.message.body.text)
+    _mark_session["awaiting_day"] = False
+    _mark_session["day"] = day
+    _mark_session["page"] = 0
+    await _send_employee_list(event.message, day, 0)
 
 
 # ============ Запуск ============
