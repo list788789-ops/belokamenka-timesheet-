@@ -22,7 +22,7 @@ import sheets
 
 # --- MAX Bot API (библиотека maxapi, см. requirements.txt) ---
 from maxapi import Bot, Dispatcher
-from maxapi.types import MessageCreated, Command
+from maxapi.types import MessageCreated, BotStarted, Command
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s — %(levelname)s — %(message)s")
@@ -126,10 +126,19 @@ async def confirm_no(event: MessageCreated):
         await event.message.answer("Сейчас нет активного запроса на подтверждение.")
 
 
+@dp.bot_started()
+async def on_bot_started(event: BotStarted):
+    await bot.send_message(
+        chat_id=event.chat_id,
+        text="Бот табеля запущен. Команды: /chatid — узнать id чата.",
+    )
+
+
 @dp.message_created(Command("chatid"))
 async def show_chat_id(event: MessageCreated):
     """Утилита: узнать chat_id (для настройки FOREMAN_CHAT_ID)."""
-    await event.message.answer(f"chat_id этого чата: {event.chat_id}")
+    chat_id = event.message.recipient.chat_id
+    await event.message.answer(f"chat_id этого чата: {chat_id}")
 
 
 # ============ Запуск ============
