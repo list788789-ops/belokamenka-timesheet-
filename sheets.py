@@ -176,6 +176,58 @@ def _grid_set(ws, row: int, col: int, value: str):
     grid[ri][ci] = value
 
 
+def check_day_conflict(name: str, date: datetime | None = None) -> str | None:
+    """
+    Проверки перед простановкой ДНЯ (Д) сотруднику:
+      - если у него в этот день уже стоит ночь (НЧ) → конфликт день/ночь
+      - если вчера была ночь (НЧ) → работа сразу после ночи
+    Возвращает текст предупреждения или None, если всё чисто.
+    """
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    n_idx = _night_col(date) - 1
+    # текущий ночной слот
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) > NAME_COL - 1 and r[NAME_COL - 1].strip() == name.strip():
+            nval = r[n_idx].strip() if len(r) > n_idx else ""
+            if nval == DN_NIGHT:
+                return f"{name} уже отмечен в НОЧЬ за этот день."
+            break
+    # вчерашняя ночь
+    from datetime import timedelta
+    yday = date - timedelta(days=1)
+    try:
+        _, ygrid = _read_grid(yday)
+        yn_idx = _night_col(yday) - 1
+        for r in ygrid[FIRST_DATA_ROW - 1:]:
+            if len(r) > NAME_COL - 1 and r[NAME_COL - 1].strip() == name.strip():
+                yval = r[yn_idx].strip() if len(r) > yn_idx else ""
+                if yval == DN_NIGHT:
+                    return f"{name} вчера работал в НОЧЬ, положен отдых."
+                break
+    except Exception:
+        pass
+    return None
+
+
+def check_night_conflict(name: str, date: datetime | None = None) -> str | None:
+    """
+    Проверка перед простановкой НОЧИ (НЧ):
+      - если сотрудник уже отработал день (Д) → конфликт день/ночь.
+    Возвращает текст предупреждения или None.
+    """
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    d_idx = _day_col(date) - 1
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) > NAME_COL - 1 and r[NAME_COL - 1].strip() == name.strip():
+            dval = r[d_idx].strip() if len(r) > d_idx else ""
+            if dval == DN_DAY:
+                return f"{name} уже отработал ДЕНЬ за эту дату."
+            break
+    return None
+
+
 def mark_day(name: str, date: datetime | None = None) -> bool:
     """Прораб отметил присутствующего днём: ДЕНЬ=Д."""
     date = date or datetime.now()
@@ -482,6 +534,102 @@ def get_fired() -> list[dict]:
     ]
 
 
+def employee_exists(name: str) -> bool:
+    """Есть ли уже такой сотрудник (активный или уволенный) в «Сотрудники»."""
+    nm = name.strip().lower()
+    return any(e["name"].strip().lower() == nm for e in get_status_list())
+
+
+def add_employee(name: str, year: int = 2026) -> bool:
+    """
+    Добавляет нового сотрудника:
+      - в лист «Сотрудники» (в конец, статус активен)
+      - строкой в конец всех 12 листов месяцев (№, ФИО)
+      - настраивает выпадающие списки Д/Н на новую строку
+    Возвращает False, если уже существует.
+    """
+    import calendar as _cal
+    from googleapiclient.discovery import build as _build
+
+    name = " ".join(name.split())  # нормализуем пробелы
+    if employee_exists(name):
+        return False
+
+    sp = _open()
+
+    # 1. Лист «Сотрудники» — добавляем в конец
+    try:
+        ws_emp = sp.worksheet(EMP_SHEET)
+    except Exception:
+        return False
+    emp_rows = ws_emp.get_all_values()
+    next_num = len([r for r in emp_rows[1:] if r and r[0].strip()]) + 1
+    ws_emp.append_row([str(next_num), name, EMP_STATUS_ACTIVE, "", ""])
+    _status_cache["data"] = None
+
+    # 2. Во все листы месяцев — строка в конец + validation
+    service = _build("sheets", "v4", credentials=_credentials())
+    meta = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    sheet_ids = {s["properties"]["title"]: s["properties"]["sheetId"]
+                 for s in meta["sheets"]}
+
+    requests = []
+    for month_idx, month_name in enumerate(MONTHS_RU, 1):
+        try:
+            ws_m = sp.worksheet(month_name)
+        except Exception:
+            continue
+        grid = ws_m.get_all_values()
+        # номер новой строки = после последней заполненной
+        last = FIRST_DATA_ROW - 1
+        for i, r in enumerate(grid):
+            if i >= FIRST_DATA_ROW - 1 and len(r) > NAME_COL - 1 and r[NAME_COL - 1].strip():
+                last = i + 1
+        new_row = last + 1
+        # № и ФИО
+        ws_m.update(f"A{new_row}:B{new_row}", [[next_num, name]])
+
+        days = _cal.monthrange(year, month_idx)[1]
+        sheet_id = sheet_ids.get(month_name)
+        if sheet_id is None:
+            continue
+        for d in range(days):
+            day_col = (FIRST_DAY_COL - 1) + d * 2  # 0-based
+            night_col = day_col + 1
+            requests.append(_dv_row(sheet_id, new_row - 1, day_col, DAY_CODES))
+            requests.append(_dv_row(sheet_id, new_row - 1, night_col, NIGHT_CODES))
+
+    if requests:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
+
+    # сбрасываем кэши
+    _ws_cache.clear()
+    _grid_cache["data"] = None
+    _rowmap_cache["data"] = {}
+    return True
+
+
+def _dv_row(sheet_id, row_idx0, col_idx0, codes):
+    """Data validation для одной ячейки (row/col 0-based)."""
+    return {
+        "setDataValidation": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": row_idx0, "endRowIndex": row_idx0 + 1,
+                "startColumnIndex": col_idx0, "endColumnIndex": col_idx0 + 1,
+            },
+            "rule": {
+                "condition": {
+                    "type": "ONE_OF_LIST",
+                    "values": [{"userEnteredValue": c} for c in codes],
+                },
+                "showCustomUi": True, "strict": False,
+            },
+        }
+    }
+
+
 _rowmap_cache = {"data": {}, "ts": 0, "sheet": None}
 _ROWMAP_TTL = 60  # секунд
 
@@ -675,9 +823,10 @@ def fire_employee(name: str, fire_day: int, date: datetime | None = None) -> boo
 
 def build_work_report(name: str, out_path: str, year: int = 2026) -> str | None:
     """
-    Формирует Excel-график работы сотрудника за месяцы, где он работал
-    (есть непустые ячейки). Возвращает путь к файлу или None.
+    Excel-график работы уволенного за месяцы, где он работал (модель день/ночь).
+    Колонки: Число | День | Ночь. Возвращает путь или None.
     """
+    import calendar as _cal
     import openpyxl
     from openpyxl.styles import Font, Alignment, Border, Side
 
@@ -696,7 +845,6 @@ def build_work_report(name: str, out_path: str, year: int = 2026) -> str | None:
         except Exception:
             continue
         grid = ws_src.get_all_values()
-        # ищем строку сотрудника
         emp_row = None
         for r in grid[FIRST_DATA_ROW - 1:]:
             if len(r) >= NAME_COL and r[NAME_COL - 1].strip() == name.strip():
@@ -704,28 +852,41 @@ def build_work_report(name: str, out_path: str, year: int = 2026) -> str | None:
                 break
         if not emp_row:
             continue
-        # значения дней (с FIRST_DAY_COL)
-        day_vals = emp_row[FIRST_DAY_COL - 1:]
-        if not any(v.strip() for v in day_vals):
-            continue  # месяц пустой — пропускаем
+
+        days = _cal.monthrange(year, month_idx)[1]
+        # пары день/ночь начиная с FIRST_DAY_COL
+        has_data = False
+        rows_out = []
+        for d in range(1, days + 1):
+            d_col = FIRST_DAY_COL - 1 + (d - 1) * 2   # 0-based
+            n_col = d_col + 1
+            dval = emp_row[d_col].strip() if len(emp_row) > d_col else ""
+            nval = emp_row[n_col].strip() if len(emp_row) > n_col else ""
+            if dval or nval:
+                has_data = True
+            rows_out.append((d, dval, nval))
+        if not has_data:
+            continue
 
         any_data = True
         ws_out = wb.create_sheet(month_name)
         ws_out["A1"] = f"{name} — {month_name} {year}"
         ws_out["A1"].font = Font(bold=True, size=12)
-        ws_out["A2"] = "День"
-        ws_out["B2"] = "Статус"
-        ws_out["A2"].font = bold
-        ws_out["B2"].font = bold
-        ws_out["A2"].border = thin
-        ws_out["B2"].border = thin
-        for d, v in enumerate(day_vals, 1):
-            ws_out.cell(row=d + 2, column=1, value=d).border = thin
-            c = ws_out.cell(row=d + 2, column=2, value=v.strip())
+        for col, title in enumerate(["Число", "День", "Ночь"], 1):
+            c = ws_out.cell(row=2, column=col, value=title)
+            c.font = bold
             c.border = thin
             c.alignment = center
-        ws_out.column_dimensions["A"].width = 6
-        ws_out.column_dimensions["B"].width = 10
+        for i, (d, dval, nval) in enumerate(rows_out, 1):
+            ws_out.cell(row=i + 2, column=1, value=d).border = thin
+            cd = ws_out.cell(row=i + 2, column=2, value=dval)
+            cn = ws_out.cell(row=i + 2, column=3, value=nval)
+            for c in (cd, cn):
+                c.border = thin
+                c.alignment = center
+        ws_out.column_dimensions["A"].width = 7
+        ws_out.column_dimensions["B"].width = 8
+        ws_out.column_dimensions["C"].width = 8
 
     if not any_data:
         return None
