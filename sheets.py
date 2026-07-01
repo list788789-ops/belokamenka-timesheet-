@@ -169,3 +169,19 @@ def get_employees(date: datetime | None = None) -> list[str]:
     ws = _worksheet_for(date)
     names = ws.col_values(NAME_COL)
     return names[FIRST_DATA_ROW - 1:]  # с третьей строки
+
+
+def set_status(emp_index: int, code: str, date: datetime | None = None):
+    """
+    Ставит статус конкретному сотруднику за конкретный день.
+    emp_index — порядковый номер сотрудника (0-based, как в get_employees).
+    code — один из ALL_CODES.
+    Возвращает (ФИО, код) для подтверждения.
+    """
+    date = date or datetime.now()
+    ws = _worksheet_for(date)
+    col = _day_column(date)
+    row = FIRST_DATA_ROW + emp_index
+    ws.update_cell(row, col, code)
+    name = ws.cell(row, NAME_COL).value
+    return name, code
