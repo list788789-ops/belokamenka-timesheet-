@@ -70,6 +70,7 @@ def _main_menu():
     kb.row(CallbackButton(text="📅 Табель за сегодня", payload="menu:today"))
     kb.row(CallbackButton(text="🚪 Оформить увольнение", payload="menu:fire"))
     kb.row(CallbackButton(text="📋 Список уволенных", payload="menu:fired"))
+    kb.row(CallbackButton(text="🧹 Очистить весь день (тест)", payload="menu:clearall"))
     return kb.as_markup()
 
 
@@ -502,6 +503,31 @@ async def cb_menu_fired(event: MessageCallback):
     for f in fired:
         lines.append(f"  ⚫ {f['name']} — уволен {f['fired_date'] or '—'}")
     await event.message.answer("\n".join(lines))
+
+
+@dp.message_callback(F.callback.payload == "menu:clearall")
+async def cb_menu_clearall(event: MessageCallback):
+    if not _is_foreman(event):
+        return
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        CallbackButton(text="✅ Да, удалить всё", payload="clearall_yes"),
+        CallbackButton(text="✖ Отмена", payload="clearall_no"),
+    )
+    await event.message.answer(
+        "⚠️ ТЕСТ: удалить отметки (день И ночь) у ВСЕХ за сегодня?",
+        attachments=[kb.as_markup()])
+
+
+@dp.message_callback(F.callback.payload == "clearall_yes")
+async def cb_clearall_yes(event: MessageCallback):
+    n = await asyncio.to_thread(sheets.clear_all_day)
+    await _edit_or_send(event, f"🧹 Очищено за сегодня: {n} сотрудников (день+ночь).")
+
+
+@dp.message_callback(F.callback.payload == "clearall_no")
+async def cb_clearall_no(event: MessageCallback):
+    await _edit_or_send(event, "Отменено.")
 
 
 async def _send_fire_list(target, page: int):
