@@ -114,35 +114,18 @@ _clear_m = {"page": 0}
 _clear_e = {"page": 0}
 
 
-_edit_diag_done = False
-
-
 async def _edit_or_send(event_or_target, text, markup=None):
-    """
-    Пытается отредактировать сообщение (callback), иначе шлёт новое.
-    При первом вызове логирует доступные методы (диагностика).
-    """
-    global _edit_diag_done
+    """Редактирует сообщение (метод edit), при неудаче шлёт новое."""
     attachments = [markup] if markup else None
     msg = getattr(event_or_target, "message", event_or_target)
 
-    # ДИАГНОСТИКА (один раз): какие методы есть у event и у message
-    if not _edit_diag_done:
-        _edit_diag_done = True
-        ev_methods = [m for m in dir(event_or_target) if not m.startswith("__")]
-        msg_methods = [m for m in dir(msg) if not m.startswith("__")]
-        log.info("DIAG event(%s) methods: %s", type(event_or_target).__name__, ev_methods)
-        log.info("DIAG message(%s) methods: %s", type(msg).__name__, msg_methods)
-
-    # Пробуем правку на самом event (у callback часто там), потом на message
     candidates = []
     for obj in (event_or_target, msg):
-        for method in ("edit", "edit_text", "edit_message", "answer_edit"):
-            fn = getattr(obj, method, None)
-            if callable(fn):
-                candidates.append((obj, method, fn))
+        fn = getattr(obj, "edit", None)
+        if callable(fn):
+            candidates.append((obj, fn))
 
-    for obj, method, fn in candidates:
+    for obj, fn in candidates:
         try:
             if attachments:
                 await fn(text, attachments=attachments)
@@ -150,10 +133,8 @@ async def _edit_or_send(event_or_target, text, markup=None):
                 await fn(text)
             return
         except Exception as e:
-            log.warning("edit method %s.%s failed: %s",
-                        type(obj).__name__, method, e)
+            log.warning("edit failed: %s", e)
 
-    # Фолбэк — новое сообщение
     if attachments:
         await msg.answer(text, attachments=attachments)
     else:
@@ -301,8 +282,8 @@ async def cb_morning_done(event: MessageCallback):
     await _send_reason_list(event.message)
 
 
-async def _send_reason_list(target, edit_event=None):
-    """Оставшиеся без отметки → выбор причины."""
+async def _send_reason_list(target, edit_event=None, page: int = 0):
+    """Оставшиеся без отметки → выбор причины (с пагинацией и «Завершить»)."""
     remaining = await asyncio.to_thread(sheets.get_unmarked_day)
     if not remaining:
         txt = "Причины проставлены всем. Утро завершено."
@@ -311,15 +292,61 @@ async def _send_reason_list(target, edit_event=None):
         else:
             await target.answer(txt)
         return
+    total = len(remaining)
+    start = page * PAGE_SIZE
+    chunk = remaining[start:start + PAGE_SIZE]
     kb = InlineKeyboardBuilder()
-    for name in remaining[:PAGE_SIZE]:
+    for name in chunk:
         kb.row(CallbackButton(text=name, payload=f"rsn:{name}"))
-    txt = (f"Укажите причину отсутствия (осталось {len(remaining)}). "
-           f"Нажмите на сотрудника:")
+    nav = []
+    if start + PAGE_SIZE < total:
+        nav.append(CallbackButton(text="Ещё ▼", payload=f"rsnpage:{page + 1}"))
+    if page > 0:
+        nav.append(CallbackButton(text="▲ Назад", payload=f"rsnpage:{page - 1}"))
+    if nav:
+        kb.row(*nav)
+    kb.row(CallbackButton(text="✅ Завершить (остальным неявка)", payload="rsnfinish"))
+    txt = (f"Укажите причину отсутствия (осталось {total}). "
+           f"Нажмите на сотрудника, либо «Завершить»:")
     if edit_event is not None:
         await _edit_or_send(edit_event, txt, kb.as_markup())
     else:
         await target.answer(txt, attachments=[kb.as_markup()])
+
+
+@dp.message_callback(F.callback.payload.startswith("rsnpage:"))
+async def cb_reason_page(event: MessageCallback):
+    page = int(event.callback.payload.split(":")[1])
+    await _send_reason_list(event.message, edit_event=event, page=page)
+
+
+@dp.message_callback(F.callback.payload == "rsnfinish")
+async def cb_reason_finish(event: MessageCallback):
+    remaining = await asyncio.to_thread(sheets.get_unmarked_day)
+    if not remaining:
+        await _edit_or_send(event, "Все размечены. Утро завершено.")
+        return
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        CallbackButton(text="✅ Да, неявка", payload="rsnfinish_yes"),
+        CallbackButton(text="✖ Отмена", payload="rsnfinish_no"),
+    )
+    await _edit_or_send(
+        event,
+        f"Всем непроставленным ({len(remaining)} чел.) будет проставлена "
+        f"неявка (Н). Продолжить?",
+        kb.as_markup())
+
+
+@dp.message_callback(F.callback.payload == "rsnfinish_yes")
+async def cb_reason_finish_yes(event: MessageCallback):
+    n = await asyncio.to_thread(sheets.fill_unmarked_absent)
+    await _edit_or_send(event, f"Утро завершено. Неявка проставлена: {n} чел.")
+
+
+@dp.message_callback(F.callback.payload == "rsnfinish_no")
+async def cb_reason_finish_no(event: MessageCallback):
+    await _send_reason_list(event.message, edit_event=event)
 
 
 @dp.message_callback(F.callback.payload.startswith("rsn:"))
