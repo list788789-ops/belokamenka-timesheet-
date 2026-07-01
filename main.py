@@ -19,6 +19,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 import sheets
+from setup_dropdowns import setup_dropdowns
 
 # --- MAX Bot API (библиотека maxapi, см. requirements.txt) ---
 from maxapi import Bot, Dispatcher
@@ -146,6 +147,16 @@ async def show_chat_id(event: MessageCreated):
 async def main():
     if not MAX_BOT_TOKEN:
         raise RuntimeError("MAX_BOT_TOKEN не задан в переменных окружения")
+
+    # Разовая настройка выпадающих списков.
+    # Включается переменной RUN_SETUP=1. После успеха убери её, чтобы
+    # не гонять настройку при каждом рестарте.
+    if os.getenv("RUN_SETUP") == "1":
+        try:
+            n = await asyncio.to_thread(setup_dropdowns)
+            log.info("Выпадающие списки настроены на %s листах.", n)
+        except Exception as e:
+            log.exception("Ошибка настройки выпадающих списков: %s", e)
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(morning_fill, CronTrigger(hour=8, minute=0))
