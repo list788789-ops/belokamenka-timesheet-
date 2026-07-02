@@ -818,6 +818,34 @@ def fire_employee(name: str, fire_date_str: str) -> bool:
     return False
 
 
+def _fire_date_with_year(name: str, ref_year: int) -> str:
+    """
+    Берёт дату увольнения из листа «Сотрудники» и дополняет годом, если его нет.
+    Правило края года: если месяц даты больше текущего — это прошлый год.
+    Возвращает 'ДД.ММ.ГГГГ' или '' если даты нет.
+    """
+    for e in get_status_list():
+        if e["name"].strip() == name.strip():
+            raw = (e.get("fired_date") or "").strip()
+            if not raw:
+                return ""
+            parts = raw.split(".")
+            if len(parts) >= 3:
+                return raw  # уже с годом
+            if len(parts) == 2:
+                try:
+                    d, m = int(parts[0]), int(parts[1])
+                except ValueError:
+                    return raw
+                now = datetime.now()
+                y = ref_year
+                if m > now.month:
+                    y = ref_year - 1  # декабрь при вводе в январе
+                return f"{d:02d}.{m:02d}.{y}"
+            return raw
+    return ""
+
+
 def build_work_report(name: str, out_path: str, year: int = 2026) -> str | None:
     """
     Excel-график работы уволенного за месяцы, где он работал (модель день/ночь).
@@ -830,6 +858,9 @@ def build_work_report(name: str, out_path: str, year: int = 2026) -> str | None:
     sp = _open()
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
+
+    # Дата увольнения из листа «Сотрудники» (с автоподстановкой года)
+    fire_date_full = _fire_date_with_year(name, year)
 
     thin = Border(*[Side(style="thin")] * 4)
     center = Alignment(horizontal="center", vertical="center")
@@ -869,6 +900,8 @@ def build_work_report(name: str, out_path: str, year: int = 2026) -> str | None:
         ws_out = wb.create_sheet(month_name)
         ws_out["A1"] = f"{name} — {month_name} {year}"
         ws_out["A1"].font = Font(bold=True, size=12)
+        if fire_date_full:
+            ws_out["A1"].value = f"{name} — {month_name} {year}   (уволен {fire_date_full})"
         for col, title in enumerate(["Число", "День", "Ночь"], 1):
             c = ws_out.cell(row=2, column=col, value=title)
             c.font = bold
