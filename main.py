@@ -724,22 +724,23 @@ async def cb_fire_pick(event: MessageCallback):
     fs["name"] = employees[idx]
     fs["awaiting_day"] = True
     await event.message.answer(
-        f"Увольняем: {employees[idx]}\nВведите число месяца — дату увольнения:")
+        f"Увольняем: {employees[idx]}\n"
+        f"Введите дату увольнения в формате ДД.ММ (например, 20.06):")
 
 
 @dp.message_callback(F.callback.payload == "fireconfirm")
 async def cb_fire_confirm(event: MessageCallback):
     fs = _sess(event)["fire"]
     name = fs["name"]
-    day = fs["day"]
-    if not name or not day:
+    fire_date = fs["day"]  # теперь строка ДД.ММ или ДД.ММ.ГГГГ
+    if not name or not fire_date:
         await event.message.answer("Данные увольнения потеряны, начните заново.")
         return
-    ok = await asyncio.to_thread(sheets.fire_employee, name, day)
+    ok = await asyncio.to_thread(sheets.fire_employee, name, fire_date)
     if not ok:
         await event.message.answer("Не удалось обновить статус.")
         return
-    await event.message.answer(f"⚫ {name} уволен с {day:02d}.{datetime.now().month:02d}.")
+    await event.message.answer(f"⚫ {name} уволен с {fire_date}.")
 
     safe = "".join(ch for ch in name if ch.isalnum() or ch in " _-").strip().replace(" ", "_")
     out_path = f"/tmp/Otchet_{safe}.xlsx"
@@ -761,30 +762,22 @@ async def cb_fire_cancel(event: MessageCallback):
 # ================= ВВОД ЧИСЕЛ / ДАТ =================
 
 
-@dp.message_created(F.message.body.text.regexp(r"^\d{1,2}\.\d{1,2}$"))
+@dp.message_created(F.message.body.text.regexp(r"^\d{1,2}\.\d{1,2}(\.\d{4})?$"))
 async def on_date_ddmm(event: MessageCreated):
-    """Дата возврата с межвахты (ДД.ММ)."""
-    rot = _sess(event)["rotation"]
-    if not rot.get("active"):
-        return
-    name = rot["name"]
-    rot["active"] = False
-    rot["name"] = None
-    await asyncio.to_thread(sheets.set_rotation_return, name, event.message.body.text)
-    await event.message.answer(
-        f"✔ {name}: межвахта до {event.message.body.text}. "
-        f"Напомню за 3 дня до возврата.")
-    await _send_reason_list(event.message)
+    """
+    Ввод даты ДД.ММ — разводится по активной сессии:
+      - увольнение (fire.awaiting_day) — приоритет
+      - межвахта (rotation.active)
+    """
+    s = _sess(event)
+    fs = s["fire"]
+    rot = s["rotation"]
+    text = event.message.body.text.strip()
 
-
-@dp.message_created(F.message.body.text.regexp(r"^\d{1,2}$"))
-async def on_day_number(event: MessageCreated):
-    """Число — дата увольнения."""
-    day = int(event.message.body.text)
-    fs = _sess(event)["fire"]
+    # 1. Увольнение
     if fs.get("awaiting_day"):
         fs["awaiting_day"] = False
-        fs["day"] = day
+        fs["day"] = text  # строка ДД.ММ
         name = fs["name"]
         kb = InlineKeyboardBuilder()
         kb.row(
@@ -792,9 +785,20 @@ async def on_day_number(event: MessageCreated):
             CallbackButton(text="✖ Отмена", payload="firecancel"),
         )
         await event.message.answer(
-            f"Уволить {name} с {day:02d}.{datetime.now().month:02d}?\n"
-            f"Он исчезнет из списка отметок.",
+            f"Уволить {name} с {text}?\nОн исчезнет из списка отметок.",
             attachments=[kb.as_markup()])
+        return
+
+    # 2. Межвахта
+    if rot.get("active"):
+        name = rot["name"]
+        rot["active"] = False
+        rot["name"] = None
+        await asyncio.to_thread(sheets.set_rotation_return, name, text)
+        await event.message.answer(
+            f"✔ {name}: межвахта до {text}. Напомню за 3 дня до возврата.")
+        await _send_reason_list(event.message)
+        return
 
 
 # ================= НАПОМИНАНИЯ О МЕЖВАХТЕ (09:00) =================
