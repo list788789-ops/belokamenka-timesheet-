@@ -795,28 +795,25 @@ def day_summary(date: datetime | None = None) -> dict:
     }
 
 
-def fire_employee(name: str, fire_day: int, date: datetime | None = None) -> bool:
+def fire_employee(name: str, fire_date_str: str) -> bool:
     """
     Помечает сотрудника уволенным в листе «Сотрудники»:
-    статус → 'уволен', дата увольнения → ДД.ММ.ГГГГ.
+    статус → 'уволен', дата увольнения → строка (ДД.ММ.ГГГГ или ДД.ММ).
     Строки в листах месяцев не трогает (история сохраняется).
     """
-    date = date or datetime.now()
     try:
         ws = _open().worksheet(EMP_SHEET)
     except Exception:
         return False
     grid = ws.get_all_values()
-    fire_date_str = f"{fire_day:02d}.{date.month:02d}.{date.year}"
     for i, r in enumerate(grid):
         if i == 0:
             continue  # шапка
         if len(r) >= 2 and r[1].strip() == name.strip():
             row = i + 1
-            # C = статус, D = дата увольнения
             ws.update_cell(row, 3, EMP_STATUS_FIRED)
             ws.update_cell(row, 4, fire_date_str)
-            _status_cache["data"] = None  # сброс кэша
+            _status_cache["data"] = None
             return True
     return False
 
