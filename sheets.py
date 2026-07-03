@@ -593,11 +593,39 @@ def add_employee(name: str, year: int = 2026) -> bool:
         sheet_id = sheet_ids.get(month_name)
         if sheet_id is None:
             continue
+        pink = {"red": 0.99, "green": 0.89, "blue": 0.84}
+        thick = {"style": "SOLID_THICK", "color": {"red": 0, "green": 0, "blue": 0}}
+        thin = {"style": "SOLID", "color": {"red": 0.6, "green": 0.6, "blue": 0.6}}
         for d in range(days):
             day_col = (FIRST_DAY_COL - 1) + d * 2  # 0-based
             night_col = day_col + 1
             requests.append(_dv_row(sheet_id, new_row - 1, day_col, DAY_CODES))
             requests.append(_dv_row(sheet_id, new_row - 1, night_col, NIGHT_CODES))
+            # розовый фон выходных для новой строки
+            if _cal.weekday(year, month_idx, d + 1) >= 5:
+                requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": new_row - 1, "endRowIndex": new_row,
+                            "startColumnIndex": day_col, "endColumnIndex": day_col + 2,
+                        },
+                        "cell": {"userEnteredFormat": {"backgroundColor": pink}},
+                        "fields": "userEnteredFormat.backgroundColor",
+                    }
+                })
+            # границы пары для новой строки
+            requests.append({
+                "updateBorders": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": new_row - 1, "endRowIndex": new_row,
+                        "startColumnIndex": day_col, "endColumnIndex": day_col + 2,
+                    },
+                    "left": thick, "right": thick, "bottom": thin,
+                    "innerVertical": thin,
+                }
+            })
 
     if requests:
         service.spreadsheets().batchUpdate(
