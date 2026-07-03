@@ -56,7 +56,9 @@ def refresh_validation():
         if sheet_id is None:
             continue
         days = calendar.monthrange(YEAR, month_idx)[1]
-        last_row = FIRST_DATA_ROW + n_emp
+        # ставим списки с запасом (до строки 50), чтобы покрыть возможные
+        # сдвиги и будущие добавления сотрудников
+        last_row = 50
         total_cols = FIRST_DAY_COL_IDX + days * 2
 
         requests = []
@@ -86,6 +88,27 @@ def refresh_validation():
             requests.append(_dv_request(
                 sheet_id, FIRST_DATA_ROW - 1, last_row,
                 night_col, night_col + 1, NIGHT_CODES))
+
+        # 3. Форматируем строку слотов Д/Н (строка 3) как синюю шапку дней:
+        #    синий фон, белый жирный текст, по центру. Столбцы только слотов.
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 2, "endRowIndex": 3,        # строка 3
+                    "startColumnIndex": FIRST_DAY_COL_IDX,
+                    "endColumnIndex": total_cols,
+                },
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": {"red": 0.26, "green": 0.45, "blue": 0.76},
+                    "horizontalAlignment": "CENTER",
+                    "verticalAlignment": "MIDDLE",
+                    "textFormat": {"bold": True,
+                                   "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+                }},
+                "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)",
+            }
+        })
 
         service.spreadsheets().batchUpdate(
             spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
