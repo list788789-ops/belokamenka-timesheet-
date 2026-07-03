@@ -41,13 +41,14 @@ DN_SICK = "Б"      # больничный
 DN_ROTATION = "МЖ" # межвахта
 DN_ABSENT = "Н"    # неявка
 DN_MIGR = "МУ"     # миграционный учёт
+DN_WEEKEND = "В"   # плановый выходной
 # Ночной слот
 DN_NIGHT = "НЧ"    # работал ночь
 
-DAY_CODES = [DN_DAY, DN_REST, DN_SICK, DN_ROTATION, DN_ABSENT, DN_MIGR]
+DAY_CODES = [DN_DAY, DN_REST, DN_SICK, DN_ROTATION, DN_ABSENT, DN_MIGR, DN_WEEKEND]
 NIGHT_CODES = [DN_NIGHT, DN_REST]
 # Причины отсутствия (для шага «оставшиеся»)
-REASON_CODES = [DN_ABSENT, DN_SICK, DN_ROTATION, DN_MIGR]
+REASON_CODES = [DN_ABSENT, DN_SICK, DN_ROTATION, DN_MIGR, DN_WEEKEND]
 
 # Русские названия месяцев = названия листов
 MONTHS_RU = [
@@ -1027,3 +1028,119 @@ def add_user(chat_id: int, name: str = "", role: str = ROLE_FOREMAN) -> bool:
 def get_admins() -> list[int]:
     """chat_id всех админов."""
     return [u["chat_id"] for u in get_users() if u["role"] == ROLE_ADMIN]
+
+
+# ================= ПРОВЕРКИ И ОТЧЁТ =================
+
+# Пороги
+ABSENT_THRESHOLD = 2   # неявок за месяц (>=) → проблема
+WEEKEND_THRESHOLD = 2  # выходных за месяц (>) → проблема
+
+
+def _month_counts(date: datetime | None = None) -> dict:
+    """
+    Считает по каждому активному сотруднику коды за месяц (дневной слот).
+    Один запрос на лист. Возвращает {ФИО: {код: count, ...}}.
+    """
+    date = date or datetime.now()
+    active = set(get_employees(date))
+    ws = _worksheet_for(date)
+    grid = ws.get_all_values()
+    days = calendar.monthrange(date.year, date.month)[1]
+
+    result = {}
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) < NAME_COL:
+            continue
+        name = r[NAME_COL - 1].strip()
+        if not name or name not in active:
+            continue
+        counts = {DN_DAY: 0, DN_NIGHT: 0, DN_REST: 0, DN_SICK: 0,
+                  DN_ROTATION: 0, DN_ABSENT: 0, DN_MIGR: 0, DN_WEEKEND: 0}
+        for d in range(days):
+            d_idx = (FIRST_DAY_COL - 1) + d * 2
+            n_idx = d_idx + 1
+            dval = r[d_idx].strip() if len(r) > d_idx else ""
+            nval = r[n_idx].strip() if len(r) > n_idx else ""
+            if dval in counts:
+                counts[dval] += 1
+            if nval == DN_NIGHT:
+                counts[DN_NIGHT] += 1
+        result[name] = counts
+    return result
+
+
+def check_problems(date: datetime | None = None) -> list[dict]:
+    """
+    Проблемные сотрудники за месяц:
+      - неявок (Н) >= ABSENT_THRESHOLD
+      - выходных (В) > WEEKEND_THRESHOLD
+    Возвращает [{name, absent, weekend, reasons:[...]}].
+    """
+    date = date or datetime.now()
+    counts = _month_counts(date)
+    problems = []
+    for name, c in counts.items():
+        reasons = []
+        if c[DN_ABSENT] >= ABSENT_THRESHOLD:
+            reasons.append(f"неявок {c[DN_ABSENT]}")
+        if c[DN_WEEKEND] > WEEKEND_THRESHOLD:
+            reasons.append(f"выходных {c[DN_WEEKEND]}")
+        if reasons:
+            problems.append({
+                "name": name,
+                "absent": c[DN_ABSENT],
+                "weekend": c[DN_WEEKEND],
+                "reasons": reasons,
+            })
+    return problems
+
+
+def build_month_summary(out_path: str, date: datetime | None = None) -> str | None:
+    """
+    Excel-свод за текущий месяц: строка на сотрудника, колонки по кодам.
+    Возвращает путь или None.
+    """
+    import openpyxl
+    from openpyxl.styles import Font, Alignment, Border, Side
+
+    date = date or datetime.now()
+    counts = _month_counts(date)
+    if not counts:
+        return None
+
+    month_name = MONTHS_RU[date.month - 1]
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = month_name
+
+    thin = Border(*[Side(style="thin")] * 4)
+    center = Alignment(horizontal="center", vertical="center")
+    bold = Font(bold=True)
+
+    headers = ["№", "ФИО", "День", "Ночь", "Отдых", "Больн.",
+               "Межв.", "Неявка", "МУ", "Вых."]
+    for col, h in enumerate(headers, 1):
+        c = ws.cell(row=1, column=col, value=h)
+        c.font = bold
+        c.border = thin
+        c.alignment = center
+
+    order = [DN_DAY, DN_NIGHT, DN_REST, DN_SICK, DN_ROTATION,
+             DN_ABSENT, DN_MIGR, DN_WEEKEND]
+    for i, (name, c) in enumerate(counts.items(), 1):
+        ws.cell(row=i + 1, column=1, value=i).border = thin
+        cell_name = ws.cell(row=i + 1, column=2, value=name)
+        cell_name.border = thin
+        for j, code in enumerate(order, 3):
+            cc = ws.cell(row=i + 1, column=j, value=c[code])
+            cc.border = thin
+            cc.alignment = center
+
+    ws.column_dimensions["A"].width = 5
+    ws.column_dimensions["B"].width = 32
+    for col in "CDEFGHIJ":
+        ws.column_dimensions[col].width = 8
+
+    wb.save(out_path)
+    return out_path
