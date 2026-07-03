@@ -89,12 +89,13 @@ def refresh_validation():
                 sheet_id, FIRST_DATA_ROW - 1, last_row,
                 night_col, night_col + 1, NIGHT_CODES))
 
-        # 3. Строка слотов Д/Н (строка 3) — синяя шапка (белый жирный, по центру).
+        # 3. Шапка дней (строки 2 и 3: числа + слоты Д/Н) — синяя,
+        #    белый жирный текст по центру. Сбрасывает старую раскраску будней.
         requests.append({
             "repeatCell": {
                 "range": {
                     "sheetId": sheet_id,
-                    "startRowIndex": 2, "endRowIndex": 3,
+                    "startRowIndex": 1, "endRowIndex": 3,
                     "startColumnIndex": FIRST_DAY_COL_IDX,
                     "endColumnIndex": total_cols,
                 },
@@ -109,8 +110,21 @@ def refresh_validation():
             }
         })
 
-        # 4. Розовым — выходные (сб/вс) по календарю: обе строки шапки и данные.
-        #    Идёт ПОСЛЕ синего, чтобы перекрыть его в выходных столбцах.
+        # 4. Сброс фона данных к белому (убирает старую раскраску выходных),
+        #    затем розовым — только сб/вс по календарю.
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": FIRST_DATA_ROW - 1, "endRowIndex": last_row,
+                    "startColumnIndex": FIRST_DAY_COL_IDX, "endColumnIndex": total_cols,
+                },
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": {"red": 1, "green": 1, "blue": 1}}},
+                "fields": "userEnteredFormat.backgroundColor",
+            }
+        })
+
         pink = {"red": 0.99, "green": 0.89, "blue": 0.84}
         for d in range(days):
             weekday = calendar.weekday(YEAR, month_idx, d + 1)
@@ -129,12 +143,13 @@ def refresh_validation():
                     "fields": "userEnteredFormat.backgroundColor",
                 }
             })
-            # данные (строки 4..50) розовым фоном
+            # данные (строки сотрудников) розовым фоном
             requests.append({
                 "repeatCell": {
                     "range": {
                         "sheetId": sheet_id,
-                        "startRowIndex": FIRST_DATA_ROW - 1, "endRowIndex": last_row,
+                        "startRowIndex": FIRST_DATA_ROW - 1,
+                        "endRowIndex": FIRST_DATA_ROW + n_emp,
                         "startColumnIndex": day_col, "endColumnIndex": day_col + 2,
                     },
                     "cell": {"userEnteredFormat": {"backgroundColor": pink}},
@@ -142,11 +157,34 @@ def refresh_validation():
                 }
             })
 
+        # 5. Границы: рамка вокруг каждой пары Д|Н от строки 2 (число) до
+        #    строки последнего сотрудника. Толстая по краям пары, тонкая
+        #    между Д и Н, тонкие горизонтали между строками.
+        emp_last_row = FIRST_DATA_ROW + n_emp  # 4 + 35 = 39 (endRowIndex, не входит)
+        thick = {"style": "SOLID_THICK", "color": {"red": 0, "green": 0, "blue": 0}}
+        thin = {"style": "SOLID", "color": {"red": 0.6, "green": 0.6, "blue": 0.6}}
+        for d in range(days):
+            day_col = FIRST_DAY_COL_IDX + d * 2
+            requests.append({
+                "updateBorders": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1,              # строка 2 (число)
+                        "endRowIndex": emp_last_row,     # до последнего сотрудника
+                        "startColumnIndex": day_col,
+                        "endColumnIndex": day_col + 2,   # пара Д|Н
+                    },
+                    "left": thick,
+                    "right": thick,
+                    "top": thick,
+                    "bottom": thick,
+                    "innerVertical": thin,     # линия между Д и Н
+                    "innerHorizontal": thin,   # между сотрудниками
+                }
+            })
+
         service.spreadsheets().batchUpdate(
             spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
-
-    print(f"Выпадающие списки обновлены (с МУ) на 12 листах.")
-    return n_emp
 
 
 if __name__ == "__main__":
