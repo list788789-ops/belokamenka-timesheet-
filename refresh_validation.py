@@ -57,8 +57,26 @@ def refresh_validation():
             continue
         days = calendar.monthrange(YEAR, month_idx)[1]
         last_row = FIRST_DATA_ROW + n_emp
+        total_cols = FIRST_DAY_COL_IDX + days * 2
 
         requests = []
+
+        # 1. Снимаем ЛЮБУЮ validation со строк шапки (0..FIRST_DATA_ROW-1),
+        #    чтобы убрать зависшие правила от старой структуры.
+        #    setDataValidation без "rule" очищает правило в диапазоне.
+        requests.append({
+            "setDataValidation": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 0,
+                    "endRowIndex": FIRST_DATA_ROW - 1,   # строки 1..3
+                    "startColumnIndex": 0,
+                    "endColumnIndex": total_cols,
+                }
+            }
+        })
+
+        # 2. Ставим списки только на строки сотрудников
         for d in range(days):
             day_col = FIRST_DAY_COL_IDX + d * 2
             night_col = day_col + 1
