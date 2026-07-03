@@ -89,13 +89,12 @@ def refresh_validation():
                 sheet_id, FIRST_DATA_ROW - 1, last_row,
                 night_col, night_col + 1, NIGHT_CODES))
 
-        # 3. Форматируем строку слотов Д/Н (строка 3) как синюю шапку дней:
-        #    синий фон, белый жирный текст, по центру. Столбцы только слотов.
+        # 3. Строка слотов Д/Н (строка 3) — синяя шапка (белый жирный, по центру).
         requests.append({
             "repeatCell": {
                 "range": {
                     "sheetId": sheet_id,
-                    "startRowIndex": 2, "endRowIndex": 3,        # строка 3
+                    "startRowIndex": 2, "endRowIndex": 3,
                     "startColumnIndex": FIRST_DAY_COL_IDX,
                     "endColumnIndex": total_cols,
                 },
@@ -109,6 +108,39 @@ def refresh_validation():
                 "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat)",
             }
         })
+
+        # 4. Розовым — выходные (сб/вс) по календарю: обе строки шапки и данные.
+        #    Идёт ПОСЛЕ синего, чтобы перекрыть его в выходных столбцах.
+        pink = {"red": 0.99, "green": 0.89, "blue": 0.84}
+        for d in range(days):
+            weekday = calendar.weekday(YEAR, month_idx, d + 1)
+            if weekday < 5:
+                continue  # будни — не трогаем (остаются синими/белыми)
+            day_col = FIRST_DAY_COL_IDX + d * 2
+            # строки 2-3 (числа + слоты) розовым, текст оставляем как есть
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1, "endRowIndex": 3,
+                        "startColumnIndex": day_col, "endColumnIndex": day_col + 2,
+                    },
+                    "cell": {"userEnteredFormat": {"backgroundColor": pink}},
+                    "fields": "userEnteredFormat.backgroundColor",
+                }
+            })
+            # данные (строки 4..50) розовым фоном
+            requests.append({
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": FIRST_DATA_ROW - 1, "endRowIndex": last_row,
+                        "startColumnIndex": day_col, "endColumnIndex": day_col + 2,
+                    },
+                    "cell": {"userEnteredFormat": {"backgroundColor": pink}},
+                    "fields": "userEnteredFormat.backgroundColor",
+                }
+            })
 
         service.spreadsheets().batchUpdate(
             spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
