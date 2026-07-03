@@ -94,6 +94,8 @@ def _main_menu():
     kb.row(CallbackButton(text="☀️ Утро (присутствующие)", payload="menu:morning"))
     kb.row(CallbackButton(text="🌙 Вечер (ночная смена)", payload="menu:evening"))
     kb.row(CallbackButton(text="📅 Табель за сегодня", payload="menu:today"))
+    kb.row(CallbackButton(text="📊 Свод (Excel)", payload="menu:summary"))
+    kb.row(CallbackButton(text="⚠️ Проблемные", payload="menu:problems"))
     kb.row(CallbackButton(text="🚪 Оформить увольнение", payload="menu:fire"))
     kb.row(CallbackButton(text="📋 Список уволенных", payload="menu:fired"))
     kb.row(CallbackButton(text="➕ Добавить сотрудника", payload="menu:addemp"))
@@ -156,9 +158,34 @@ async def cb_today(event: MessageCallback):
     await event.message.answer("\n".join(lines))
 
 
-# ================= СЕССИИ ПО ПОЛЬЗОВАТЕЛЯМ =================
-# Каждый прораб имеет своё состояние, чтобы не перебивать других.
-_sessions = {}
+@dp.message_callback(F.callback.payload == "menu:problems")
+async def cb_problems(event: MessageCallback):
+    problems = await asyncio.to_thread(sheets.check_problems)
+    if not problems:
+        await event.message.answer("Проблемных нет.")
+        return
+    lines = ["⚠️ Проблемные за месяц:"]
+    for p in problems:
+        lines.append(f"  • {p['name']}: {', '.join(p['reasons'])}")
+    await event.message.answer("\n".join(lines))
+
+
+@dp.message_callback(F.callback.payload == "menu:summary")
+async def cb_summary(event: MessageCallback):
+    await event.message.answer("Формирую свод за месяц…")
+    import datetime as _dt
+    month = _MONTHS_GEN[datetime.now().month - 1]
+    out_path = f"/tmp/Svod_{month}.xlsx"
+    path = await asyncio.to_thread(sheets.build_month_summary, out_path)
+    if not path:
+        await event.message.answer("Нет данных для свода.")
+        return
+    try:
+        await bot.send_file(chat_id=event.message.recipient.chat_id, path=path)
+    except Exception:
+        await event.message.answer(
+            "Свод сформирован, но отправка файла в MAX не удалась. "
+            "Проверю метод отправки по логам.")
 
 
 def _new_session():
@@ -218,6 +245,18 @@ async def _edit_or_send(event_or_target, text, markup=None):
         await msg.answer(text, attachments=attachments)
     else:
         await msg.answer(text)
+
+
+async def _show_problems(event_or_target):
+    """Показывает проблемных за месяц (неявки/выходные) текстом, если есть."""
+    problems = await asyncio.to_thread(sheets.check_problems)
+    if not problems:
+        return
+    msg = getattr(event_or_target, "message", event_or_target)
+    lines = ["⚠️ Проблемные за месяц:"]
+    for p in problems:
+        lines.append(f"  • {p['name']}: {', '.join(p['reasons'])}")
+    await msg.answer("\n".join(lines))
 
 
 async def _finish(event_or_target, text):
@@ -391,6 +430,7 @@ async def cb_morning_done(event: MessageCallback):
     remaining = await asyncio.to_thread(sheets.get_unmarked_day)
     if not remaining:
         await _finish(event, "Все отмечены. Утро завершено.")
+        await _show_problems(event)
         return
     _sess(event)["morning"]["reason_mode"] = True
     await _send_reason_list(event.message, edit_event=event)
@@ -403,6 +443,7 @@ async def _send_reason_list(target, edit_event=None, page: int = 0):
         txt = "Причины проставлены всем. Утро завершено."
         if edit_event is not None:
             await _finish(edit_event, txt)
+            await _show_problems(edit_event)
         else:
             await target.answer(txt)
         return
@@ -456,6 +497,7 @@ async def cb_reason_finish(event: MessageCallback):
 async def cb_reason_finish_yes(event: MessageCallback):
     n = await asyncio.to_thread(sheets.fill_unmarked_absent)
     await _finish(event, f"Утро завершено. Неявка проставлена: {n} чел.")
+    await _show_problems(event)
 
 
 @dp.message_callback(F.callback.payload == "rsnfinish_no")
@@ -475,6 +517,7 @@ async def cb_pick_reason(event: MessageCallback):
         CallbackButton(text="✈️ Межвахта", payload=f"setrsn:{name}:{sheets.DN_ROTATION}"),
         CallbackButton(text="📋 Мигр.учёт", payload=f"setrsn:{name}:{sheets.DN_MIGR}"),
     )
+    kb.row(CallbackButton(text="🏖 Выходной", payload=f"setrsn:{name}:{sheets.DN_WEEKEND}"))
     await _edit_or_send(event, f"{name} — причина?", kb.as_markup())
 
 
@@ -608,6 +651,7 @@ async def cb_force_night(event: MessageCallback):
 @dp.message_callback(F.callback.payload == "edone")
 async def cb_evening_done(event: MessageCallback):
     await _finish(event, "🌙 Вечерняя отметка завершена.")
+    await _show_problems(event)
 
 
 # ================= УВОЛЬНЕНИЕ =================
