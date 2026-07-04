@@ -911,42 +911,60 @@ async def rotation_reminders_job():
 
 # ================= ЗАПУСК =================
 
-# Диагностика приёма файла — ловит именно вложения (F.message.body.attachments).
-# Логирует структуру, чтобы понять формат payload и способ скачивания.
+# Приём Excel со списком ФИО: скачивание, парсинг, массовое добавление.
 @dp.message_created(F.message.body.attachments)
-async def on_file_upload_diag(event: MessageCreated):
+async def on_file_upload(event: MessageCreated):
     s = _sess(event)
     if not s["upload"].get("awaiting"):
         return
     s["upload"]["awaiting"] = False
 
     atts = event.message.body.attachments
-    log.info("DIAG attachments type: %s, len: %s", type(atts).__name__,
-             len(atts) if hasattr(atts, "__len__") else "?")
-    for i, att in enumerate(atts):
-        log.info("DIAG att[%d] type=%s attrs=%s", i, type(att).__name__,
-                 [a for a in dir(att) if not a.startswith("_")])
-        # частые поля вложения
-        for attr in ("type", "payload", "url", "token", "filename", "name", "size"):
-            val = getattr(att, attr, None)
-            if val is not None:
-                log.info("DIAG att[%d].%s = %r", i, attr, val)
-        # payload обычно содержит token/url
-        payload = getattr(att, "payload", None)
-        if payload is not None:
-            log.info("DIAG att[%d].payload attrs=%s", i,
-                     [a for a in dir(payload) if not a.startswith("_")])
-            for pattr in ("token", "url", "id", "filename", "name"):
-                pval = getattr(payload, pattr, None)
-                if pval is not None:
-                    log.info("DIAG att[%d].payload.%s = %r", i, pattr, pval)
+    file_att = next((a for a in atts if getattr(a, "type", "") == "file"), None)
+    if file_att is None:
+        await event.message.answer("Во вложении нет файла. Пришлите .xlsx.")
+        return
 
-    # какие методы скачивания есть у bot
-    dl = [m for m in dir(bot) if any(k in m.lower()
-          for k in ("download", "get_file", "fetch"))]
-    log.info("DIAG bot download-methods: %s", dl)
+    filename = getattr(file_att, "filename", "") or ""
+    if not filename.lower().endswith((".xlsx", ".xls")):
+        await event.message.answer("Нужен файл Excel (.xlsx).")
+        return
 
-    await event.message.answer("Файл получен. Структуру вложения проверю по логам.")
+    await event.message.answer("Загружаю файл, обрабатываю…")
+
+    tmp_path = f"/tmp/upload_{_chat_id(event)}.xlsx"
+    try:
+        await bot.download_file(file_att, tmp_path)
+    except Exception as e:
+        log.warning("download_file failed: %s", e)
+        # запасной путь — по url из payload
+        try:
+            url = file_att.payload.url
+            import urllib.request
+            await asyncio.to_thread(urllib.request.urlretrieve, url, tmp_path)
+        except Exception as e2:
+            log.warning("url download failed: %s", e2)
+            await event.message.answer("Не удалось скачать файл.")
+            return
+
+    result = await asyncio.to_thread(sheets.add_employees_from_xlsx, tmp_path)
+    if result.get("error"):
+        await event.message.answer(result["error"])
+        return
+
+    lines = []
+    if result["added"]:
+        lines.append(f"✅ Добавлено ({len(result['added'])}):")
+        lines += [f"  • {n}" for n in result["added"]]
+    if result["skipped"]:
+        lines.append(f"⚠️ Пропущены (уже есть) ({len(result['skipped'])}):")
+        lines += [f"  • {n}" for n in result["skipped"]]
+    if result["invalid"]:
+        lines.append(f"❌ Не распознаны как ФИО ({len(result['invalid'])}):")
+        lines += [f"  • {n}" for n in result["invalid"]]
+    if not lines:
+        lines = ["Файл пуст или не содержит ФИО."]
+    await event.message.answer("\n".join(lines))
 
 
 async def main():
