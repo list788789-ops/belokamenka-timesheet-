@@ -611,7 +611,9 @@ def _ws_by_title(sp, title: str):
     return _ws_cache[title]
 
 
-def add_employee(name: str, year: int = 2026, _skip_exists_check: bool = False) -> bool:
+def add_employee(name: str, year: int = 2026, _skip_exists_check: bool = False,
+                  _next_num: int | None = None, _emp_new_row: int | None = None,
+                  _last_rows: dict | None = None) -> bool:
     """
     Добавляет нового сотрудника:
       - в лист «Сотрудники» (в конец, статус активен)
@@ -621,8 +623,14 @@ def add_employee(name: str, year: int = 2026, _skip_exists_check: bool = False) 
 
     _skip_exists_check: пропустить employee_exists() (и лишний API-запрос),
     когда вызывающий код уже сам проверил уникальность имени по локальным
-    данным (см. add_employees_from_xlsx) — иначе на массовой загрузке
-    получаем один лишний Read-запрос на каждого нового сотрудника.
+    данным (см. add_employees_from_xlsx).
+
+    _next_num / _emp_new_row / _last_rows: предвычисленное состояние для
+    пакетной загрузки — если передано, add_employee НЕ читает «Сотрудники»
+    и не делает _fetch_last_rows() заново, а использует переданные значения.
+    Вызывающий код (add_employees_from_xlsx) обязан сам инкрементировать
+    эти значения после каждого успешного добавления — иначе следующий
+    сотрудник попадёт в ту же строку.
     """
     import calendar as _cal
     from googleapiclient.discovery import build as _build
@@ -633,14 +641,18 @@ def add_employee(name: str, year: int = 2026, _skip_exists_check: bool = False) 
 
     sp = _open()
 
-    # 1. Лист «Сотрудники» — вычисляем номер новой строки без отдельной записи
-    try:
-        ws_emp = sp.worksheet(EMP_SHEET)
-    except Exception:
-        return False
-    emp_rows = ws_emp.get_all_values()
-    next_num = len([r for r in emp_rows[1:] if r and r[0].strip()]) + 1
-    emp_new_row = len(emp_rows) + 1
+    # 1. Лист «Сотрудники» — номер новой строки (из кэша пачки либо читаем)
+    if _next_num is None or _emp_new_row is None:
+        try:
+            sp.worksheet(EMP_SHEET)
+        except Exception:
+            return False
+        emp_rows = sp.worksheet(EMP_SHEET).get_all_values()
+        next_num = len([r for r in emp_rows[1:] if r and r[0].strip()]) + 1
+        emp_new_row = len(emp_rows) + 1
+    else:
+        next_num = _next_num
+        emp_new_row = _emp_new_row
     hire_date = datetime.now().strftime("%d.%m.%Y")
     _status_cache["data"] = None
 
@@ -648,7 +660,7 @@ def add_employee(name: str, year: int = 2026, _skip_exists_check: bool = False) 
     # запрос values().batchUpdate — вместо 13 отдельных write-вызовов.
     service = _build("sheets", "v4", credentials=_credentials())
     sheet_ids = _get_sheet_ids(service)
-    last_rows = _fetch_last_rows(service)
+    last_rows = _last_rows if _last_rows is not None else _fetch_last_rows(service)
 
     # A=№ B=ФИО C=статус D=увольнение E=межвахта F=дата приёма
     value_data = [{
@@ -1408,6 +1420,21 @@ def add_employees_from_xlsx(file_path: str) -> dict:
 
     ws = wb.active
     status_list = get_status_list()
+
+    # Предзагрузка состояния ОДИН раз на всю пачку — дальше инкрементируем
+    # в памяти, без обращений к Sheets API на каждого сотрудника.
+    from googleapiclient.discovery import build as _build
+    sp = _open()
+    service = _build("sheets", "v4", credentials=_credentials())
+    last_rows = _fetch_last_rows(service)
+    try:
+        emp_rows = sp.worksheet(EMP_SHEET).get_all_values()
+        next_num = len([r for r in emp_rows[1:] if r and r[0].strip()]) + 1
+        emp_new_row = len(emp_rows) + 1
+    except Exception:
+        next_num = len(status_list) + 1
+        emp_new_row = len(status_list) + 2  # +1 шапка, +1 новая строка
+
     first = True
     for row in ws.iter_rows(values_only=True):
         if first:
@@ -1437,10 +1464,17 @@ def add_employees_from_xlsx(file_path: str) -> dict:
             fuzzy.append({"new": name, "existing": [m["name"] for m in fm]})
             continue
 
-        ok = add_employee(name, _skip_exists_check=True)
+        ok = add_employee(name, _skip_exists_check=True,
+                           _next_num=next_num, _emp_new_row=emp_new_row,
+                           _last_rows=last_rows)
         if ok:
             added.append(name)
             status_list.append({"name": name, "status": EMP_STATUS_ACTIVE, "fired_date": ""})
+            # инкремент локального состояния — без повторного чтения API
+            next_num += 1
+            emp_new_row += 1
+            for m in MONTHS_RU:
+                last_rows[m] = last_rows.get(m, FIRST_DATA_ROW - 1) + 1
         else:
             skipped.append(name)
 
