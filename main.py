@@ -93,14 +93,31 @@ def _main_menu():
     kb = InlineKeyboardBuilder()
     kb.row(CallbackButton(text="☀️ Утро (присутствующие)", payload="menu:morning"))
     kb.row(CallbackButton(text="🌙 Вечер (ночная смена)", payload="menu:evening"))
-    kb.row(CallbackButton(text="📅 Табель за сегодня", payload="menu:today"))
-    kb.row(CallbackButton(text="📊 Свод (Excel)", payload="menu:summary"))
-    kb.row(CallbackButton(text="⚠️ Проблемные", payload="menu:problems"))
+    kb.row(CallbackButton(text="📁 Отчёты", payload="menu:reports"))
     kb.row(CallbackButton(text="🚪 Оформить увольнение", payload="menu:fire"))
-    kb.row(CallbackButton(text="📋 Список уволенных", payload="menu:fired"))
     kb.row(CallbackButton(text="➕ Добавить сотрудника", payload="menu:addemp"))
     kb.row(CallbackButton(text="🧹 Очистить весь день (тест)", payload="menu:clearall"))
     return kb.as_markup()
+
+
+def _reports_menu():
+    kb = InlineKeyboardBuilder()
+    kb.row(CallbackButton(text="📅 Табель за сегодня", payload="menu:today"))
+    kb.row(CallbackButton(text="📊 Свод (Excel)", payload="menu:summary"))
+    kb.row(CallbackButton(text="⚠️ Проблемные", payload="menu:problems"))
+    kb.row(CallbackButton(text="📋 Список уволенных", payload="menu:fired"))
+    kb.row(CallbackButton(text="◀ Назад", payload="menu:back"))
+    return kb.as_markup()
+
+
+@dp.message_callback(F.callback.payload == "menu:reports")
+async def cb_menu_reports(event: MessageCallback):
+    await _edit_or_send(event, "📁 Отчёты:", _reports_menu())
+
+
+@dp.message_callback(F.callback.payload == "menu:back")
+async def cb_menu_back(event: MessageCallback):
+    await _edit_or_send(event, "Выберите действие:", _main_menu())
 
 
 @dp.bot_started()
