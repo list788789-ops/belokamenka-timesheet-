@@ -213,6 +213,9 @@ async def cb_summary(event: MessageCallback):
             "Свод сформирован, но отправка файла не удалась.")
 
 
+_sessions = {}
+
+
 def _new_session():
     return {
         "morning": {"page": 0, "reason_mode": False},
