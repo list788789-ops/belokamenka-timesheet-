@@ -26,6 +26,7 @@ from employees_sheet import create_employees_sheet
 from rebuild_daynight import rebuild_daynight
 from refresh_validation import refresh_validation
 from setup_users import setup_users
+from add_hire_date import add_hire_date
 
 from maxapi import Bot, Dispatcher, F
 from maxapi.types import MessageCreated, BotStarted, Command, MessageCallback, CallbackButton, InputMedia
@@ -944,6 +945,13 @@ async def main():
             log.info("Лист «Пользователи» создан. Админ: %s", aid)
         except Exception as e:
             log.exception("Ошибка создания пользователей: %s", e)
+
+    if os.getenv("RUN_HIRE_DATE") == "1":
+        try:
+            n = await asyncio.to_thread(add_hire_date)
+            log.info("Дата приёма проставлена: %s активным.", n)
+        except Exception as e:
+            log.exception("Ошибка простановки даты приёма: %s", e)
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(rotation_reminders_job, CronTrigger(hour=9, minute=0))
