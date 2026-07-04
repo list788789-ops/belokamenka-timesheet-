@@ -1146,7 +1146,7 @@ def _daily_codes(date: datetime | None = None) -> dict:
       только ночь (НЧ)  → 'НЧ'  (в т.ч. когда день = О)
       дневной код (Д/Б/МЖ/МУ/В/Н) → он сам
       пусто → '' (в файле станет прочерком)
-    Возвращает {ФИО: [код_дня1, код_дня2, ...]}.
+    Возвращает {ФИО: {"num": табельный_№, "codes": [коды по дням]}}.
     """
     date = date or datetime.now()
     active = set(get_employees(date))
@@ -1161,6 +1161,11 @@ def _daily_codes(date: datetime | None = None) -> dict:
         name = r[NAME_COL - 1].strip()
         if not name or name not in active:
             continue
+        num_raw = r[NUM_COL - 1].strip() if len(r) > NUM_COL - 1 else ""
+        try:
+            num = int(num_raw)
+        except ValueError:
+            num = num_raw  # на случай нечислового значения
         row_codes = []
         for d in range(days):
             d_idx = (FIRST_DAY_COL - 1) + d * 2
@@ -1176,7 +1181,7 @@ def _daily_codes(date: datetime | None = None) -> dict:
             else:
                 code = ""                       # пусто
             row_codes.append(code)
-        result[name] = row_codes
+        result[name] = {"num": num, "codes": row_codes}
     return result
 
 
@@ -1232,9 +1237,11 @@ def build_month_summary(out_path: str, date: datetime | None = None) -> str | No
 
     row = start_row + 1
     ordered_names = sorted(daily.keys(), key=lambda n: n.strip().lower())
-    for i, name in enumerate(ordered_names, 1):
-        codes = daily[name]
-        ws.cell(row, 1, i).border = thin
+    for name in ordered_names:
+        entry = daily[name]
+        num = entry["num"]
+        codes = entry["codes"]
+        ws.cell(row, 1, num).border = thin
         ws.cell(row, 1).alignment = center
         nc = ws.cell(row, 2, name)
         nc.border = thin; nc.alignment = left
