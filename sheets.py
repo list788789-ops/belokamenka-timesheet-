@@ -522,7 +522,8 @@ def get_employees(date: datetime | None = None) -> list[str]:
     """
     status = get_status_list()
     if status:
-        return [e["name"] for e in status if e["status"] == EMP_STATUS_ACTIVE]
+        active = [e["name"] for e in status if e["status"] == EMP_STATUS_ACTIVE]
+        return sorted(active, key=lambda n: n.strip().lower())
     return _all_month_names(date)
 
 
@@ -1230,7 +1231,9 @@ def build_month_summary(out_path: str, date: datetime | None = None) -> str | No
         c.font = bold; c.alignment = center; c.border = hdr_border
 
     row = start_row + 1
-    for i, (name, codes) in enumerate(daily.items(), 1):
+    ordered_names = sorted(daily.keys(), key=lambda n: n.strip().lower())
+    for i, name in enumerate(ordered_names, 1):
+        codes = daily[name]
         ws.cell(row, 1, i).border = thin
         ws.cell(row, 1).alignment = center
         nc = ws.cell(row, 2, name)
