@@ -28,6 +28,7 @@ from refresh_validation import refresh_validation
 from setup_users import setup_users
 from add_hire_date import add_hire_date
 from remove_duplicate import remove_duplicate
+from repair_formatting import repair_formatting
 
 from maxapi import Bot, Dispatcher, F
 from maxapi.types import MessageCreated, BotStarted, Command, MessageCallback, CallbackButton, InputMedia
@@ -1048,6 +1049,13 @@ async def main():
             log.info("Удаление дубликата: %s", result)
         except Exception as e:
             log.exception("Ошибка удаления дубликата: %s", e)
+
+    if os.getenv("RUN_REPAIR_FORMATTING") == "1":
+        try:
+            result = await asyncio.to_thread(repair_formatting)
+            log.info("Восстановление форматирования: %s", result)
+        except Exception as e:
+            log.exception("Ошибка восстановления форматирования: %s", e)
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(rotation_reminders_job, CronTrigger(hour=9, minute=0))
