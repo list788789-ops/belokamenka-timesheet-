@@ -20,8 +20,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 import sheets
-from repair_formatting import repair_formatting
-from repair_ab_borders import repair_ab_borders
 
 from maxapi import Bot, Dispatcher, F
 from maxapi.types import MessageCreated, BotStarted, Command, MessageCallback, CallbackButton, InputMedia
@@ -986,20 +984,6 @@ async def on_file_upload(event: MessageCreated):
 async def main():
     if not MAX_BOT_TOKEN:
         raise RuntimeError("MAX_BOT_TOKEN не задан")
-
-    if os.getenv("RUN_REPAIR_FORMATTING") == "1":
-        try:
-            result = await asyncio.to_thread(repair_formatting)
-            log.info("Восстановление форматирования: %s", result)
-        except Exception as e:
-            log.exception("Ошибка восстановления форматирования: %s", e)
-
-    if os.getenv("RUN_REPAIR_AB_BORDERS") == "1":
-        try:
-            result = await asyncio.to_thread(repair_ab_borders)
-            log.info("Восстановление границ A/B: %s", result)
-        except Exception as e:
-            log.exception("Ошибка восстановления границ A/B: %s", e)
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(rotation_reminders_job, CronTrigger(hour=9, minute=0))
