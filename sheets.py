@@ -675,6 +675,21 @@ def add_employee(name: str, year: int = 2026, _skip_exists_check: bool = False) 
         pink = {"red": 0.99, "green": 0.89, "blue": 0.84}
         thick = {"style": "SOLID_THICK", "color": {"red": 0, "green": 0, "blue": 0}}
         thin = {"style": "SOLID", "color": {"red": 0.6, "green": 0.6, "blue": 0.6}}
+        black_thin = {"style": "SOLID", "color": {"red": 0, "green": 0, "blue": 0}}
+        # Граница на № и ФИО — раньше её тут не было вообще, хотя в
+        # исходном шаблоне (строки 1-37) она есть на каждой строке.
+        requests.append({
+            "updateBorders": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": new_row - 1, "endRowIndex": new_row,
+                    "startColumnIndex": 0, "endColumnIndex": 2,
+                },
+                "top": black_thin, "bottom": black_thin,
+                "left": black_thin, "right": black_thin,
+                "innerVertical": black_thin,
+            }
+        })
         for d in range(days):
             day_col = (FIRST_DAY_COL - 1) + d * 2  # 0-based
             night_col = day_col + 1
@@ -1295,7 +1310,7 @@ def build_month_summary(out_path: str, date: datetime | None = None) -> str | No
     Возвращает путь или None.
     """
     import openpyxl
-    from openpyxl.styles import Font, Alignment, Border, Side
+    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
     from openpyxl.utils import get_column_letter
 
     date = date or datetime.now()
@@ -1308,12 +1323,15 @@ def build_month_summary(out_path: str, date: datetime | None = None) -> str | No
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Табель"
+    ws.sheet_view.showGridLines = True  # видимая сетка листа (для пустых ячеек вокруг таблицы)
 
-    thin = Border(*[Side(style="thin")] * 4)
+    thin = Border(*[Side(style="thin", color="999999")] * 4)
     center = Alignment(horizontal="center", vertical="center")
     left = Alignment(horizontal="left", vertical="center")
     bold = Font(bold=True)
     title_font = Font(bold=True, size=12)
+    header_fill = PatternFill(start_color="4A86E8", end_color="4A86E8", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
 
     # --- Шапка формы ---
     ws["A1"] = "ИП Буц Сергей Юрьевич"
@@ -1327,15 +1345,14 @@ def build_month_summary(out_path: str, date: datetime | None = None) -> str | No
     red_bold = Font(bold=True, color="CC0000")
 
     # Один блок на весь месяц: Таб.№ | ФИО | дни 1..days
-    hdr_border = thin  # шапка дат — обычная тонкая рамка
     start_row = 6
     hc = ws.cell(start_row, 1, "Таб.№")
-    hc.font = bold; hc.alignment = center; hc.border = hdr_border
+    hc.font = header_font; hc.alignment = center; hc.border = thin; hc.fill = header_fill
     hc = ws.cell(start_row, 2, "ФИО")
-    hc.font = bold; hc.alignment = center; hc.border = hdr_border
+    hc.font = header_font; hc.alignment = center; hc.border = thin; hc.fill = header_fill
     for k in range(days):
         c = ws.cell(start_row, 3 + k, k + 1)
-        c.font = bold; c.alignment = center; c.border = hdr_border
+        c.font = header_font; c.alignment = center; c.border = thin; c.fill = header_fill
 
     row = start_row + 1
     ordered_names = sorted(daily.keys(), key=lambda n: n.strip().lower())
