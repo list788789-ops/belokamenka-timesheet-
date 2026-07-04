@@ -1070,6 +1070,45 @@ def _month_counts(date: datetime | None = None) -> dict:
     return result
 
 
+def _month_counts_halved(date: datetime | None = None) -> dict:
+    """
+    Как _month_counts, но с разбивкой на половины месяца.
+    Возвращает {ФИО: {"h1": {код:n}, "h2": {код:n}, "m": {код:n}}}.
+    h1 — дни 1..15, h2 — дни 16..конец, m — весь месяц.
+    """
+    date = date or datetime.now()
+    active = set(get_employees(date))
+    ws = _worksheet_for(date)
+    grid = ws.get_all_values()
+    days = calendar.monthrange(date.year, date.month)[1]
+
+    def _blank():
+        return {DN_DAY: 0, DN_NIGHT: 0, DN_REST: 0, DN_SICK: 0,
+                DN_ROTATION: 0, DN_ABSENT: 0, DN_MIGR: 0, DN_WEEKEND: 0}
+
+    result = {}
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) < NAME_COL:
+            continue
+        name = r[NAME_COL - 1].strip()
+        if not name or name not in active:
+            continue
+        h1, h2 = _blank(), _blank()
+        for d in range(days):
+            d_idx = (FIRST_DAY_COL - 1) + d * 2
+            n_idx = d_idx + 1
+            dval = r[d_idx].strip() if len(r) > d_idx else ""
+            nval = r[n_idx].strip() if len(r) > n_idx else ""
+            bucket = h1 if d < 15 else h2   # дни 1..15 → h1, 16.. → h2
+            if dval in bucket:
+                bucket[dval] += 1
+            if nval == DN_NIGHT:
+                bucket[DN_NIGHT] += 1
+        m = {k: h1[k] + h2[k] for k in h1}
+        result[name] = {"h1": h1, "h2": h2, "m": m}
+    return result
+
+
 def check_problems(date: datetime | None = None) -> list[dict]:
     """
     Проблемные сотрудники за месяц:
@@ -1098,49 +1137,97 @@ def check_problems(date: datetime | None = None) -> list[dict]:
 
 def build_month_summary(out_path: str, date: datetime | None = None) -> str | None:
     """
-    Excel-свод за текущий месяц: строка на сотрудника, колонки по кодам.
-    Возвращает путь или None.
+    Свод в виде формы Т-13: шапка (ИП, подразделение, период),
+    табельный номер, разбивка на половины месяца + месячный итог.
+    Коды — внутренние (Д/НЧ/О/Б/МЖ/Н/МУ/В). Возвращает путь или None.
     """
     import openpyxl
     from openpyxl.styles import Font, Alignment, Border, Side
 
     date = date or datetime.now()
-    counts = _month_counts(date)
-    if not counts:
+    data = _month_counts_halved(date)
+    if not data:
         return None
 
     month_name = MONTHS_RU[date.month - 1]
+    days = calendar.monthrange(date.year, date.month)[1]
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = month_name
+    ws.title = "Т-13"
 
     thin = Border(*[Side(style="thin")] * 4)
-    center = Alignment(horizontal="center", vertical="center")
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="center")
     bold = Font(bold=True)
+    title_font = Font(bold=True, size=12)
 
-    headers = ["№", "ФИО", "День", "Ночь", "Отдых", "Больн.",
-               "Межв.", "Неявка", "МУ", "Вых."]
-    for col, h in enumerate(headers, 1):
-        c = ws.cell(row=1, column=col, value=h)
-        c.font = bold
-        c.border = thin
-        c.alignment = center
+    # --- Шапка формы ---
+    ws["A1"] = "ИП Буц Сергей Юрьевич"
+    ws["A1"].font = title_font
+    ws["A2"] = "Подразделение: Новатэк Белокаменка/ПСМ"
+    ws["A3"] = f"Табель учёта рабочего времени за {month_name} {date.year}"
+    ws["A3"].font = bold
+    ws["A4"] = (f"Отчётный период: 01.{date.month:02d}.{date.year} — "
+                f"{days:02d}.{date.month:02d}.{date.year}")
 
-    order = [DN_DAY, DN_NIGHT, DN_REST, DN_SICK, DN_ROTATION,
+    # --- Заголовки таблицы (2 уровня: блок / код) ---
+    hdr_row1 = 6   # блоки: Таб.№ / ФИО / 1-я половина / 2-я половина / Месяц
+    hdr_row2 = 7   # коды внутри блоков
+
+    codes = [DN_DAY, DN_NIGHT, DN_REST, DN_SICK, DN_ROTATION,
              DN_ABSENT, DN_MIGR, DN_WEEKEND]
-    for i, (name, c) in enumerate(counts.items(), 1):
-        ws.cell(row=i + 1, column=1, value=i).border = thin
-        cell_name = ws.cell(row=i + 1, column=2, value=name)
-        cell_name.border = thin
-        for j, code in enumerate(order, 3):
-            cc = ws.cell(row=i + 1, column=j, value=c[code])
-            cc.border = thin
-            cc.alignment = center
+    code_names = ["Д", "НЧ", "О", "Б", "МЖ", "Н", "МУ", "В"]
+    ncodes = len(codes)
 
-    ws.column_dimensions["A"].width = 5
+    # Таб.№ и ФИО — объединяем по вертикали (две строки шапки)
+    ws.merge_cells(start_row=hdr_row1, start_column=1, end_row=hdr_row2, end_column=1)
+    ws.merge_cells(start_row=hdr_row1, start_column=2, end_row=hdr_row2, end_column=2)
+    ws.cell(hdr_row1, 1, "Таб. №")
+    ws.cell(hdr_row1, 2, "ФИО")
+
+    # Блоки половин и месяца
+    blocks = [("1-я половина (1–15)", 3),
+              ("2-я половина (16–31)", 3 + ncodes),
+              ("За месяц", 3 + ncodes * 2)]
+    for title, c0 in blocks:
+        ws.merge_cells(start_row=hdr_row1, start_column=c0,
+                       end_row=hdr_row1, end_column=c0 + ncodes - 1)
+        bc = ws.cell(hdr_row1, c0, title)
+        bc.font = bold
+        bc.alignment = center
+        for k, cn in enumerate(code_names):
+            cc = ws.cell(hdr_row2, c0 + k, cn)
+            cc.font = bold
+            cc.alignment = center
+            cc.border = thin
+
+    for cc in (ws.cell(hdr_row1, 1), ws.cell(hdr_row1, 2)):
+        cc.font = bold
+        cc.alignment = center
+        cc.border = thin
+
+    # --- Данные ---
+    row = hdr_row2 + 1
+    for i, (name, blk) in enumerate(data.items(), 1):
+        ws.cell(row, 1, i).border = thin
+        ws.cell(row, 1).alignment = center
+        nc = ws.cell(row, 2, name)
+        nc.border = thin
+        nc.alignment = left
+        for bi, part in enumerate(("h1", "h2", "m")):
+            c0 = 3 + bi * ncodes
+            for k, code in enumerate(codes):
+                cc = ws.cell(row, c0 + k, blk[part][code])
+                cc.border = thin
+                cc.alignment = center
+        row += 1
+
+    # --- Ширины ---
+    ws.column_dimensions["A"].width = 7
     ws.column_dimensions["B"].width = 32
-    for col in "CDEFGHIJ":
-        ws.column_dimensions[col].width = 8
+    from openpyxl.utils import get_column_letter
+    for col in range(3, 3 + ncodes * 3):
+        ws.column_dimensions[get_column_letter(col)].width = 5
 
     wb.save(out_path)
     return out_path
