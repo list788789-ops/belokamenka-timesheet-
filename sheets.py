@@ -1217,12 +1217,8 @@ def build_month_summary(out_path: str, date: datetime | None = None) -> str | No
     red_bold = Font(bold=True, color="CC0000")
 
     # Один блок на весь месяц: Таб.№ | ФИО | дни 1..days
-    hdr_border = thin  # шапка дат — обычная тонкая рамка (без верхней линии)
+    hdr_border = thin  # шапка дат — обычная тонкая рамка
     start_row = 6
-    # Разделительная линия — снизу строки 5
-    sep_border = Border(bottom=Side(style="medium"))
-    for col in range(1, 3 + days):
-        ws.cell(start_row - 1, col).border = sep_border
     hc = ws.cell(start_row, 1, "Таб.№")
     hc.font = bold; hc.alignment = center; hc.border = hdr_border
     hc = ws.cell(start_row, 2, "ФИО")
