@@ -633,22 +633,28 @@ def add_employee(name: str, year: int = 2026, _skip_exists_check: bool = False) 
 
     sp = _open()
 
-    # 1. Лист «Сотрудники» — добавляем в конец
+    # 1. Лист «Сотрудники» — вычисляем номер новой строки без отдельной записи
     try:
         ws_emp = sp.worksheet(EMP_SHEET)
     except Exception:
         return False
     emp_rows = ws_emp.get_all_values()
     next_num = len([r for r in emp_rows[1:] if r and r[0].strip()]) + 1
+    emp_new_row = len(emp_rows) + 1
     hire_date = datetime.now().strftime("%d.%m.%Y")
-    # A=№ B=ФИО C=статус D=увольнение E=межвахта F=дата приёма
-    ws_emp.append_row([str(next_num), name, EMP_STATUS_ACTIVE, "", "", hire_date])
     _status_cache["data"] = None
 
-    # 2. Во все листы месяцев — строка в конец + validation
+    # 2. Собираем ВСЕ записи значений (Сотрудники + 12 месяцев) в ОДИН
+    # запрос values().batchUpdate — вместо 13 отдельных write-вызовов.
     service = _build("sheets", "v4", credentials=_credentials())
     sheet_ids = _get_sheet_ids(service)
     last_rows = _fetch_last_rows(service)
+
+    # A=№ B=ФИО C=статус D=увольнение E=межвахта F=дата приёма
+    value_data = [{
+        "range": f"{EMP_SHEET}!A{emp_new_row}:F{emp_new_row}",
+        "values": [[str(next_num), name, EMP_STATUS_ACTIVE, "", "", hire_date]],
+    }]
 
     requests = []
     for month_idx, month_name in enumerate(MONTHS_RU, 1):
@@ -657,8 +663,10 @@ def add_employee(name: str, year: int = 2026, _skip_exists_check: bool = False) 
         except Exception:
             continue
         new_row = last_rows.get(month_name, FIRST_DATA_ROW - 1) + 1
-        # № и ФИО
-        ws_m.update(f"A{new_row}:B{new_row}", [[next_num, name]])
+        value_data.append({
+            "range": f"{month_name}!A{new_row}:B{new_row}",
+            "values": [[next_num, name]],
+        })
 
         days = _cal.monthrange(year, month_idx)[1]
         sheet_id = sheet_ids.get(month_name)
@@ -697,6 +705,12 @@ def add_employee(name: str, year: int = 2026, _skip_exists_check: bool = False) 
                     "innerVertical": thin,
                 }
             })
+
+    # Одним вызовом пишем ВСЕ значения (Сотрудники + 12 месяцев)
+    service.spreadsheets().values().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"valueInputOption": "USER_ENTERED", "data": value_data}
+    ).execute()
 
     if requests:
         service.spreadsheets().batchUpdate(
