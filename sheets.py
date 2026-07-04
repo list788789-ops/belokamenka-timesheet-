@@ -1217,16 +1217,19 @@ def build_month_summary(out_path: str, date: datetime | None = None) -> str | No
     red_bold = Font(bold=True, color="CC0000")
 
     # Один блок на весь месяц: Таб.№ | ФИО | дни 1..days
-    thick_top = Border(top=Side(style="medium"), bottom=Side(style="thin"),
-                       left=Side(style="thin"), right=Side(style="thin"))
+    hdr_border = thin  # шапка дат — обычная тонкая рамка (без верхней линии)
     start_row = 6
+    # Разделительная линия — снизу строки 5
+    sep_border = Border(bottom=Side(style="medium"))
+    for col in range(1, 3 + days):
+        ws.cell(start_row - 1, col).border = sep_border
     hc = ws.cell(start_row, 1, "Таб.№")
-    hc.font = bold; hc.alignment = center; hc.border = thick_top
+    hc.font = bold; hc.alignment = center; hc.border = hdr_border
     hc = ws.cell(start_row, 2, "ФИО")
-    hc.font = bold; hc.alignment = center; hc.border = thick_top
+    hc.font = bold; hc.alignment = center; hc.border = hdr_border
     for k in range(days):
         c = ws.cell(start_row, 3 + k, k + 1)
-        c.font = bold; c.alignment = center; c.border = thick_top
+        c.font = bold; c.alignment = center; c.border = hdr_border
 
     row = start_row + 1
     for i, (name, codes) in enumerate(daily.items(), 1):
