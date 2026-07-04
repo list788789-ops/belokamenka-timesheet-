@@ -97,6 +97,7 @@ def _main_menu(is_admin: bool = False):
     kb.row(CallbackButton(text="📁 Отчёты", payload="menu:reports"))
     kb.row(CallbackButton(text="🚪 Оформить увольнение", payload="menu:fire"))
     kb.row(CallbackButton(text="➕ Добавить сотрудника", payload="menu:addemp"))
+    kb.row(CallbackButton(text="📥 Загрузить Excel", payload="menu:upload"))
     if is_admin:
         kb.row(CallbackButton(text="🧹 Очистить весь день (тест)", payload="menu:clearall"))
     return kb.as_markup()
@@ -226,6 +227,7 @@ def _new_session():
         "fire": {"page": 0, "day": None, "name": None, "awaiting_day": False},
         "rotation": {"name": None, "active": False},
         "addemp": {"awaiting": False},
+        "upload": {"awaiting": False},
     }
 
 
@@ -735,6 +737,15 @@ async def on_new_employee_name(event: MessageCreated):
         await event.message.answer("Не удалось добавить (возможно, уже существует).")
 
 
+@dp.message_callback(F.callback.payload == "menu:upload")
+async def cb_menu_upload(event: MessageCallback):
+    if not await _is_foreman(event):
+        return
+    _sess(event)["upload"]["awaiting"] = True
+    await event.message.answer(
+        "Пришлите файл Excel (.xlsx) со списком ФИО — по одному в строке.")
+
+
 @dp.message_callback(F.callback.payload == "menu:clearall")
 async def cb_menu_clearall(event: MessageCallback):
     if not await _is_admin(event):
@@ -899,6 +910,32 @@ async def rotation_reminders_job():
 
 
 # ================= ЗАПУСК =================
+
+# Диагностика приёма файла — ПОСЛЕДНИЙ обработчик message_created,
+# чтобы не перехватывать ФИО/даты. Реагирует только если ждём загрузку.
+@dp.message_created()
+async def on_file_upload_diag(event: MessageCreated):
+    s = _sess(event)
+    if not s["upload"].get("awaiting"):
+        return
+    s["upload"]["awaiting"] = False
+
+    msg = event.message
+    log.info("DIAG upload msg attrs: %s",
+             [a for a in dir(msg) if not a.startswith("_")])
+    body = getattr(msg, "body", None)
+    if body is not None:
+        log.info("DIAG upload body attrs: %s",
+                 [a for a in dir(body) if not a.startswith("_")])
+        for attr in ("attachments", "attachment", "media", "file", "document"):
+            val = getattr(body, attr, None)
+            if val is not None:
+                log.info("DIAG upload body.%s = %r", attr, val)
+    log.info("DIAG upload event attrs: %s",
+             [a for a in dir(event) if not a.startswith("_")])
+
+    await event.message.answer("Файл получен. Структуру проверю по логам.")
+
 
 async def main():
     if not MAX_BOT_TOKEN:
