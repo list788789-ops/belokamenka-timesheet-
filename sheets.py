@@ -1220,6 +1220,11 @@ def build_month_summary(out_path: str, date: datetime | None = None) -> str | No
     thick_top = Border(top=Side(style="thick"), bottom=Side(style="thin"),
                        left=Side(style="thin"), right=Side(style="thin"))
     start_row = 6
+    # Дублируем линию снизу у строки-разделителя (5), чтобы верхняя граница
+    # шапки дат гарантированно прорисовалась в мобильных просмотрщиках.
+    sep_border = Border(bottom=Side(style="thick"))
+    for col in range(1, 3 + days):
+        ws.cell(start_row - 1, col).border = sep_border
     hc = ws.cell(start_row, 1, "Таб.№")
     hc.font = bold; hc.alignment = center; hc.border = thick_top
     hc = ws.cell(start_row, 2, "ФИО")
