@@ -542,6 +542,20 @@ def employee_exists(name: str) -> bool:
     return any(e["name"].strip().lower() == nm for e in get_status_list())
 
 
+def _name_key(name: str) -> str:
+    """Фамилия+Имя (первые 2 токена) в нижнем регистре — для fuzzy-сравнения."""
+    parts = name.split()
+    return " ".join(parts[:2]).strip().lower() if len(parts) >= 2 else name.strip().lower()
+
+
+def find_fuzzy_matches(name: str) -> list[dict]:
+    """Существующие сотрудники с тем же Фамилия+Имя, но другим полным ФИО."""
+    key = _name_key(name)
+    nm_full = name.strip().lower()
+    return [e for e in get_status_list()
+            if _name_key(e["name"]) == key and e["name"].strip().lower() != nm_full]
+
+
 def add_employee(name: str, year: int = 2026) -> bool:
     """
     Добавляет нового сотрудника:
@@ -1272,18 +1286,23 @@ def add_employees_from_xlsx(file_path: str) -> dict:
     Массовое добавление сотрудников из Excel.
     Первый столбец = ФИО, первая строка = шапка (пропускается).
     Дата приёма = сегодня (внутри add_employee).
-    Возвращает {added:[...], skipped:[...], invalid:[...]}.
+    Возвращает {added, skipped, invalid, fuzzy, fired}.
+      fuzzy  — Фамилия+Имя совпали с существующим, но полное ФИО другое —
+               не добавлены, требуют ручной проверки
+      fired  — точное совпадение ФИО со статусом "уволен" —
+               не добавлены и не восстановлены (статус не трогаем)
     """
     import openpyxl
 
-    added, skipped, invalid = [], [], []
+    added, skipped, invalid, fuzzy, fired = [], [], [], [], []
     try:
         wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
     except Exception as e:
-        return {"added": [], "skipped": [], "invalid": [],
+        return {"added": [], "skipped": [], "invalid": [], "fuzzy": [], "fired": [],
                 "error": f"Не удалось открыть файл: {e}"}
 
     ws = wb.active
+    status_list = get_status_list()
     first = True
     for row in ws.iter_rows(values_only=True):
         if first:
@@ -1298,13 +1317,27 @@ def add_employees_from_xlsx(file_path: str) -> dict:
                 all(ch.isalpha() or ch == "-" for ch in p) for p in parts):
             invalid.append(name)
             continue
-        if employee_exists(name):
-            skipped.append(name)
+
+        nm_full = name.strip().lower()
+        exact = next((e for e in status_list if e["name"].strip().lower() == nm_full), None)
+        if exact:
+            if exact["status"] == EMP_STATUS_FIRED:
+                fired.append(name)
+            else:
+                skipped.append(name)
             continue
+
+        fm = find_fuzzy_matches(name)
+        if fm:
+            fuzzy.append({"new": name, "existing": [m["name"] for m in fm]})
+            continue
+
         ok = add_employee(name)
         if ok:
             added.append(name)
+            status_list.append({"name": name, "status": EMP_STATUS_ACTIVE, "fired_date": ""})
         else:
             skipped.append(name)
 
-    return {"added": added, "skipped": skipped, "invalid": invalid}
+    return {"added": added, "skipped": skipped, "invalid": invalid,
+            "fuzzy": fuzzy, "fired": fired}
