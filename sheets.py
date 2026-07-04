@@ -567,19 +567,68 @@ def find_fuzzy_matches(name: str, status_list: list[dict] | None = None) -> list
             if _name_key(e["name"]) == key and e["name"].strip().lower() != nm_full]
 
 
-def add_employee(name: str, year: int = 2026) -> bool:
+_sheet_meta_cache = {"sheet_ids": None, "ts": 0}
+_SHEET_META_TTL = 3600  # структура листов не меняется на лету, кэшируем на час
+
+
+def _get_sheet_ids(service) -> dict:
+    """sheetId по названию листа, кэш на час — метаданные не меняются между
+    добавлениями сотрудников, незачем читать их заново на каждого."""
+    now = time.time()
+    if _sheet_meta_cache["sheet_ids"] is None or now - _sheet_meta_cache["ts"] > _SHEET_META_TTL:
+        meta = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+        _sheet_meta_cache["sheet_ids"] = {
+            s["properties"]["title"]: s["properties"]["sheetId"] for s in meta["sheets"]
+        }
+        _sheet_meta_cache["ts"] = now
+    return _sheet_meta_cache["sheet_ids"]
+
+
+def _fetch_last_rows(service) -> dict:
+    """
+    Одним batchGet-запросом получает номер последней занятой строки (по ФИО)
+    для всех 12 листов месяцев разом — вместо 12 отдельных get_all_values().
+    Возвращает {название_месяца: последняя_строка}.
+    """
+    ranges = [f"{m}!B{FIRST_DATA_ROW}:B" for m in MONTHS_RU]
+    resp = service.spreadsheets().values().batchGet(
+        spreadsheetId=SPREADSHEET_ID, ranges=ranges).execute()
+    result = {}
+    for month, vr in zip(MONTHS_RU, resp.get("valueRanges", [])):
+        values = vr.get("values", [])
+        last = FIRST_DATA_ROW - 1
+        for i, row in enumerate(values):
+            if row and row[0].strip():
+                last = FIRST_DATA_ROW + i
+        result[month] = last
+    return result
+
+
+def _ws_by_title(sp, title: str):
+    """Worksheet по названию с кэшем на весь процесс (см. _ws_cache)."""
+    if title not in _ws_cache:
+        _ws_cache[title] = sp.worksheet(title)
+    return _ws_cache[title]
+
+
+def add_employee(name: str, year: int = 2026, _skip_exists_check: bool = False) -> bool:
     """
     Добавляет нового сотрудника:
       - в лист «Сотрудники» (в конец, статус активен)
       - строкой в конец всех 12 листов месяцев (№, ФИО)
       - настраивает выпадающие списки Д/Н на новую строку
     Возвращает False, если уже существует.
+
+    _skip_exists_check: пропустить employee_exists() (и лишний API-запрос),
+    когда вызывающий код уже сам проверил уникальность имени по локальным
+    данным (см. add_employees_from_xlsx) — иначе на массовой загрузке
+    получаем один лишний Read-запрос на каждого нового сотрудника.
     """
     import calendar as _cal
     from googleapiclient.discovery import build as _build
 
     name = " ".join(name.split())  # нормализуем пробелы
-    if employee_exists(name):
+    if not _skip_exists_check and employee_exists(name):
         return False
 
     sp = _open()
@@ -598,23 +647,16 @@ def add_employee(name: str, year: int = 2026) -> bool:
 
     # 2. Во все листы месяцев — строка в конец + validation
     service = _build("sheets", "v4", credentials=_credentials())
-    meta = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
-    sheet_ids = {s["properties"]["title"]: s["properties"]["sheetId"]
-                 for s in meta["sheets"]}
+    sheet_ids = _get_sheet_ids(service)
+    last_rows = _fetch_last_rows(service)
 
     requests = []
     for month_idx, month_name in enumerate(MONTHS_RU, 1):
         try:
-            ws_m = sp.worksheet(month_name)
+            ws_m = _ws_by_title(sp, month_name)
         except Exception:
             continue
-        grid = ws_m.get_all_values()
-        # номер новой строки = после последней заполненной
-        last = FIRST_DATA_ROW - 1
-        for i, r in enumerate(grid):
-            if i >= FIRST_DATA_ROW - 1 and len(r) > NAME_COL - 1 and r[NAME_COL - 1].strip():
-                last = i + 1
-        new_row = last + 1
+        new_row = last_rows.get(month_name, FIRST_DATA_ROW - 1) + 1
         # № и ФИО
         ws_m.update(f"A{new_row}:B{new_row}", [[next_num, name]])
 
@@ -660,8 +702,9 @@ def add_employee(name: str, year: int = 2026) -> bool:
         service.spreadsheets().batchUpdate(
             spreadsheetId=SPREADSHEET_ID, body={"requests": requests}).execute()
 
-    # сбрасываем кэши
-    _ws_cache.clear()
+    # сбрасываем кэши данных (не _ws_cache — сами объекты Worksheet не
+    # устаревают, а их сброс на каждом добавлении сводит на нет кэш из
+    # _ws_by_title при массовой загрузке нескольких сотрудников подряд)
     _grid_cache["data"] = None
     _rowmap_cache["data"] = {}
     return True
@@ -1363,7 +1406,7 @@ def add_employees_from_xlsx(file_path: str) -> dict:
             fuzzy.append({"new": name, "existing": [m["name"] for m in fm]})
             continue
 
-        ok = add_employee(name)
+        ok = add_employee(name, _skip_exists_check=True)
         if ok:
             added.append(name)
             status_list.append({"name": name, "status": EMP_STATUS_ACTIVE, "fired_date": ""})
