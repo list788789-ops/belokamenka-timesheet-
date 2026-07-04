@@ -89,15 +89,21 @@ async def _send_access_request(event, cid: int):
 
 # ================= МЕНЮ =================
 
-def _main_menu():
+def _main_menu(is_admin: bool = False):
     kb = InlineKeyboardBuilder()
     kb.row(CallbackButton(text="☀️ Утро (присутствующие)", payload="menu:morning"))
     kb.row(CallbackButton(text="🌙 Вечер (ночная смена)", payload="menu:evening"))
     kb.row(CallbackButton(text="📁 Отчёты", payload="menu:reports"))
     kb.row(CallbackButton(text="🚪 Оформить увольнение", payload="menu:fire"))
     kb.row(CallbackButton(text="➕ Добавить сотрудника", payload="menu:addemp"))
-    kb.row(CallbackButton(text="🧹 Очистить весь день (тест)", payload="menu:clearall"))
+    if is_admin:
+        kb.row(CallbackButton(text="🧹 Очистить весь день (тест)", payload="menu:clearall"))
     return kb.as_markup()
+
+
+async def _is_admin(event) -> bool:
+    role = await asyncio.to_thread(sheets.get_role, _chat_id(event))
+    return role == sheets.ROLE_ADMIN
 
 
 def _reports_menu():
@@ -117,19 +123,20 @@ async def cb_menu_reports(event: MessageCallback):
 
 @dp.message_callback(F.callback.payload == "menu:back")
 async def cb_menu_back(event: MessageCallback):
-    await _edit_or_send(event, "Выберите действие:", _main_menu())
+    await _edit_or_send(event, "Выберите действие:", _main_menu(await _is_admin(event)))
 
 
 @dp.bot_started()
 async def on_bot_started(event: BotStarted):
+    is_admin = (await asyncio.to_thread(sheets.get_role, event.chat_id)) == sheets.ROLE_ADMIN
     await bot.send_message(chat_id=event.chat_id,
                            text="Бот табеля. Выберите действие:",
-                           attachments=[_main_menu()])
+                           attachments=[_main_menu(is_admin)])
 
 
 @dp.message_created(Command("menu"))
 async def show_menu(event: MessageCreated):
-    await event.message.answer("Выберите действие:", attachments=[_main_menu()])
+    await event.message.answer("Выберите действие:", attachments=[_main_menu(await _is_admin(event))])
 
 
 @dp.message_created(Command("chatid"))
@@ -726,7 +733,7 @@ async def on_new_employee_name(event: MessageCreated):
 
 @dp.message_callback(F.callback.payload == "menu:clearall")
 async def cb_menu_clearall(event: MessageCallback):
-    if not await _is_foreman(event):
+    if not await _is_admin(event):
         return
     kb = InlineKeyboardBuilder()
     kb.row(
