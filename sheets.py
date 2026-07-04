@@ -79,6 +79,15 @@ ROLE_FOREMAN = "прораб"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
+class SheetsBusyError(Exception):
+    """Google Sheets API временно недоступен (превышена квота запросов)."""
+    pass
+
+
+def _is_quota_error(e: Exception) -> bool:
+    return isinstance(e, gspread.exceptions.APIError) and "429" in str(e)
+
+
 def _credentials():
     """
     Загружает Credentials.
@@ -548,11 +557,13 @@ def _name_key(name: str) -> str:
     return " ".join(parts[:2]).strip().lower() if len(parts) >= 2 else name.strip().lower()
 
 
-def find_fuzzy_matches(name: str) -> list[dict]:
+def find_fuzzy_matches(name: str, status_list: list[dict] | None = None) -> list[dict]:
     """Существующие сотрудники с тем же Фамилия+Имя, но другим полным ФИО."""
+    if status_list is None:
+        status_list = get_status_list()
     key = _name_key(name)
     nm_full = name.strip().lower()
-    return [e for e in get_status_list()
+    return [e for e in status_list
             if _name_key(e["name"]) == key and e["name"].strip().lower() != nm_full]
 
 
@@ -992,16 +1003,27 @@ def _ensure_users_sheet():
 
 
 def get_users(force: bool = False) -> list[dict]:
-    """Список пользователей бота: [{chat_id, name, role}]."""
+    """
+    Список пользователей бота: [{chat_id, name, role}].
+    При превышении квоты Sheets (429): если есть кэш — отдаём его (пусть
+    устаревший, это лучше, чем ложное "нет доступа"); если кэша нет —
+    поднимаем SheetsBusyError, чтобы вызывающий код показал понятную
+    причину, а не решил, что пользователя нет в списке.
+    """
     now = time.time()
     if (not force and _users_cache["data"] is not None
             and now - _users_cache["ts"] < _USERS_TTL):
         return _users_cache["data"]
     try:
         ws = _open().worksheet(USERS_SHEET)
-    except Exception:
+        rows = ws.get_all_values()[1:]
+    except Exception as e:
+        if _is_quota_error(e):
+            if _users_cache["data"] is not None:
+                return _users_cache["data"]
+            raise SheetsBusyError(
+                "Google Sheets временно перегружен, попробуйте через минуту.") from e
         return []
-    rows = ws.get_all_values()[1:]
     result = []
     for r in rows:
         if r and r[0].strip():
@@ -1043,8 +1065,17 @@ def add_user(chat_id: int, name: str = "", role: str = ROLE_FOREMAN) -> bool:
 
 
 def get_admins() -> list[int]:
-    """chat_id всех админов."""
-    return [u["chat_id"] for u in get_users() if u["role"] == ROLE_ADMIN]
+    """
+    chat_id всех админов.
+    При перегрузке Sheets (SheetsBusyError) отдаём пустой список —
+    вызывающий код (_send_access_request) просто не сможет уведомить
+    админов в этот момент, но обработчик не падает необработанным 429.
+    """
+    try:
+        users = get_users()
+    except SheetsBusyError:
+        return []
+    return [u["chat_id"] for u in users if u["role"] == ROLE_ADMIN]
 
 
 # ================= ПРОВЕРКИ И ОТЧЁТ =================
@@ -1327,7 +1358,7 @@ def add_employees_from_xlsx(file_path: str) -> dict:
                 skipped.append(name)
             continue
 
-        fm = find_fuzzy_matches(name)
+        fm = find_fuzzy_matches(name, status_list)
         if fm:
             fuzzy.append({"new": name, "existing": [m["name"] for m in fm]})
             continue
