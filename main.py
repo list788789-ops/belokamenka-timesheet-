@@ -27,6 +27,7 @@ from rebuild_daynight import rebuild_daynight
 from refresh_validation import refresh_validation
 from setup_users import setup_users
 from add_hire_date import add_hire_date
+from remove_duplicate import remove_duplicate
 
 from maxapi import Bot, Dispatcher, F
 from maxapi.types import MessageCreated, BotStarted, Command, MessageCallback, CallbackButton, InputMedia
@@ -1040,6 +1041,13 @@ async def main():
             log.info("Дата приёма проставлена: %s активным.", n)
         except Exception as e:
             log.exception("Ошибка простановки даты приёма: %s", e)
+
+    if os.getenv("RUN_REMOVE_DUPLICATE") == "1":
+        try:
+            result = await asyncio.to_thread(remove_duplicate)
+            log.info("Удаление дубликата: %s", result)
+        except Exception as e:
+            log.exception("Ошибка удаления дубликата: %s", e)
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(rotation_reminders_job, CronTrigger(hour=9, minute=0))
