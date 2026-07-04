@@ -565,7 +565,9 @@ def add_employee(name: str, year: int = 2026) -> bool:
         return False
     emp_rows = ws_emp.get_all_values()
     next_num = len([r for r in emp_rows[1:] if r and r[0].strip()]) + 1
-    ws_emp.append_row([str(next_num), name, EMP_STATUS_ACTIVE, "", ""])
+    hire_date = datetime.now().strftime("%d.%m.%Y")
+    # A=№ B=ФИО C=статус D=увольнение E=межвахта F=дата приёма
+    ws_emp.append_row([str(next_num), name, EMP_STATUS_ACTIVE, "", "", hire_date])
     _status_cache["data"] = None
 
     # 2. Во все листы месяцев — строка в конец + validation
