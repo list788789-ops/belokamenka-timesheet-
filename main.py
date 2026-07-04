@@ -58,7 +58,7 @@ async def _is_foreman(event) -> bool:
         allowed = await asyncio.to_thread(sheets.is_allowed, cid)
     except sheets.SheetsBusyError:
         try:
-            await event.message.answer(
+            await _send(event.message, 
                 "⏳ Google Sheets временно перегружен (превышена квота запросов). "
                 "Попробуйте через минуту.")
         except Exception:
@@ -74,7 +74,7 @@ async def _is_foreman(event) -> bool:
 async def _send_access_request(event, cid: int):
     """Сообщает пользователю о заявке и шлёт админам кнопку добавления."""
     try:
-        await event.message.answer(
+        await _send(event.message, 
             "Вы не в списке пользователей. Запрос на добавление отправлен админу.")
     except Exception:
         pass
@@ -99,10 +99,10 @@ def _main_menu(is_admin: bool = False):
     kb.row(CallbackButton(text="🌙 Вечер (ночная смена)", payload="menu:evening"))
     kb.row(CallbackButton(text="📁 Отчёты", payload="menu:reports"))
     kb.row(CallbackButton(text="🚪 Оформить увольнение", payload="menu:fire"))
-    kb.row(CallbackButton(text="➕ Добавить сотрудника", payload="menu:addemp"))
-    kb.row(CallbackButton(text="📥 Загрузить Excel", payload="menu:upload"))
+    kb.row(CallbackButton(text="👤 Приём", payload="menu:intake"))
     if is_admin:
         kb.row(CallbackButton(text="🧹 Очистить весь день (тест)", payload="menu:clearall"))
+        kb.row(CallbackButton(text="🗑 Удалить сообщения бота", payload="menu:clearmsgs"))
     return kb.as_markup()
 
 
@@ -124,9 +124,22 @@ def _reports_menu():
     return kb.as_markup()
 
 
+def _intake_menu():
+    kb = InlineKeyboardBuilder()
+    kb.row(CallbackButton(text="➕ Добавить сотрудника", payload="menu:addemp"))
+    kb.row(CallbackButton(text="📥 Загрузить Excel", payload="menu:upload"))
+    kb.row(CallbackButton(text="◀ Назад", payload="menu:back"))
+    return kb.as_markup()
+
+
 @dp.message_callback(F.callback.payload == "menu:reports")
 async def cb_menu_reports(event: MessageCallback):
     await _edit_or_send(event, "📁 Отчёты:", _reports_menu())
+
+
+@dp.message_callback(F.callback.payload == "menu:intake")
+async def cb_menu_intake(event: MessageCallback):
+    await _edit_or_send(event, "👤 Приём:", _intake_menu())
 
 
 @dp.message_callback(F.callback.payload == "menu:back")
@@ -144,12 +157,12 @@ async def on_bot_started(event: BotStarted):
 
 @dp.message_created(Command("menu"))
 async def show_menu(event: MessageCreated):
-    await event.message.answer("Выберите действие:", attachments=[_main_menu(await _is_admin(event))])
+    await _send(event.message, "Выберите действие:", attachments=[_main_menu(await _is_admin(event))])
 
 
 @dp.message_created(Command("chatid"))
 async def show_chat_id(event: MessageCreated):
-    await event.message.answer(f"chat_id этого чата: {event.message.recipient.chat_id}")
+    await _send(event.message, f"chat_id этого чата: {event.message.recipient.chat_id}")
 
 
 @dp.message_callback(F.callback.payload.startswith("adduser:"))
@@ -158,7 +171,7 @@ async def cb_add_user(event: MessageCallback):
     admin_id = _chat_id(event)
     role = await asyncio.to_thread(sheets.get_role, admin_id)
     if role != sheets.ROLE_ADMIN:
-        await event.message.answer("Только админ может добавлять пользователей.")
+        await _send(event.message, "Только админ может добавлять пользователей.")
         return
     new_id = int(event.callback.payload.split(":")[1])
     ok = await asyncio.to_thread(sheets.add_user, new_id, "Прораб", sheets.ROLE_FOREMAN)
@@ -187,29 +200,29 @@ async def cb_today(event: MessageCallback):
         lines.append("\nОтсутствуют/особое:")
         for name, code in s["absent_list"]:
             lines.append(f"  • {name} — {code}")
-    await event.message.answer("\n".join(lines))
+    await _send(event.message, "\n".join(lines))
 
 
 @dp.message_callback(F.callback.payload == "menu:problems")
 async def cb_problems(event: MessageCallback):
     problems = await asyncio.to_thread(sheets.check_problems)
     if not problems:
-        await event.message.answer("Проблемных нет.")
+        await _send(event.message, "Проблемных нет.")
         return
     lines = ["⚠️ Проблемные за месяц:"]
     for p in problems:
         lines.append(f"  • {p['name']}: {', '.join(p['reasons'])}")
-    await event.message.answer("\n".join(lines))
+    await _send(event.message, "\n".join(lines))
 
 
 @dp.message_callback(F.callback.payload == "menu:summary")
 async def cb_summary(event: MessageCallback):
-    await event.message.answer("Формирую свод за месяц…")
+    await _send(event.message, "Формирую свод за месяц…")
     month = _MONTHS_GEN[datetime.now().month - 1]
     out_path = f"/tmp/Svod_{month}.xlsx"
     path = await asyncio.to_thread(sheets.build_month_summary, out_path)
     if not path:
-        await event.message.answer("Нет данных для свода.")
+        await _send(event.message, "Нет данных для свода.")
         return
     try:
         await bot.send_message(
@@ -217,7 +230,7 @@ async def cb_summary(event: MessageCallback):
             attachments=[InputMedia(path=path)])
     except Exception as e:
         log.warning("send summary failed: %s", e)
-        await event.message.answer(
+        await _send(event.message, 
             "Свод сформирован, но отправка файла не удалась.")
 
 
@@ -234,6 +247,7 @@ def _new_session():
         "rotation": {"name": None, "active": False},
         "addemp": {"awaiting": False},
         "upload": {"awaiting": False},
+        "sent_msgs": [],  # сообщения бота в этом чате — для «Удалить сообщения бота»
     }
 
 
@@ -252,6 +266,28 @@ def _sess(event):
     if cid not in _sessions:
         _sessions[cid] = _new_session()
     return _sessions[cid]
+
+
+async def _send(target, text, attachments=None):
+    """
+    Обёртка над .answer(): отправляет сообщение и запоминает его в сессии
+    чата — нужно кнопке «🗑 Удалить сообщения бота» (админ), чтобы потом
+    удалить именно то, что бот сам отправил. Чужие сообщения (от людей)
+    бот удалять не может — ограничение платформы, не этого кода.
+    Покрывает только сообщения, отправленные ПОСЛЕ включения этой правки —
+    старую историю бот не помнит.
+    """
+    if attachments is not None:
+        msg = await target.answer(text, attachments=attachments)
+    else:
+        msg = await target.answer(text)
+    try:
+        cid = _chat_id(target)
+        s = _sessions.setdefault(cid, _new_session())
+        s.setdefault("sent_msgs", []).append(msg)
+    except Exception:
+        log.warning("Не удалось запомнить отправленное сообщение для очистки")
+    return msg
 
 
 async def _edit_or_send(event_or_target, text, markup=None):
@@ -279,9 +315,9 @@ async def _edit_or_send(event_or_target, text, markup=None):
             log.warning("edit failed: %s", e)
 
     if attachments is not None:
-        await msg.answer(text, attachments=attachments)
+        await _send(msg, text, attachments=attachments)
     else:
-        await msg.answer(text)
+        await _send(msg, text)
 
 
 async def _show_problems(event_or_target):
@@ -293,7 +329,7 @@ async def _show_problems(event_or_target):
     lines = ["⚠️ Проблемные за месяц:"]
     for p in problems:
         lines.append(f"  • {p['name']}: {', '.join(p['reasons'])}")
-    await msg.answer("\n".join(lines))
+    await _send(msg, "\n".join(lines))
 
 
 async def _finish(event_or_target, text):
@@ -310,7 +346,7 @@ async def _finish(event_or_target, text):
                 break
             except Exception as e:
                 log.warning("delete failed: %s", e)
-    await msg.answer(text)
+    await _send(msg, text)
 
 
 async def _send_morning_list(target, page: int, edit_event=None):
@@ -336,7 +372,7 @@ async def _send_morning_list(target, page: int, edit_event=None):
     if edit_event is not None:
         await _edit_or_send(edit_event, txt, kb.as_markup())
     else:
-        await target.answer(txt, attachments=[kb.as_markup()])
+        await _send(target, txt, attachments=[kb.as_markup()])
 
 
 @dp.message_callback(F.callback.payload == "menu:morning")
@@ -355,7 +391,7 @@ async def cb_menu_morning(event: MessageCallback):
             CallbackButton(text="▶️ Продолжить", payload="mcontinue"),
             CallbackButton(text="🔄 Начать заново", payload="mrestart"),
         )
-        await event.message.answer(
+        await _send(event.message, 
             f"Отметка за сегодня не завершена: отмечено {prog['marked']}, "
             f"осталось {prog['unmarked']}. Продолжить?",
             attachments=[kb.as_markup()])
@@ -370,7 +406,7 @@ async def _morning_start(target):
     for nm in rest_names:
         await asyncio.to_thread(sheets.set_rest, nm)
     if rest_names:
-        await target.answer("С ночи отдыхают (проставлен отдых):\n" +
+        await _send(target, "С ночи отдыхают (проставлен отдых):\n" +
                             "\n".join(f"  😴 {n}" for n in rest_names))
     await _send_morning_list(target, 0)
 
@@ -482,7 +518,7 @@ async def _send_reason_list(target, edit_event=None, page: int = 0):
             await _finish(edit_event, txt)
             await _show_problems(edit_event)
         else:
-            await target.answer(txt)
+            await _send(target, txt)
         return
     total = len(remaining)
     start = page * PAGE_SIZE
@@ -503,7 +539,7 @@ async def _send_reason_list(target, edit_event=None, page: int = 0):
     if edit_event is not None:
         await _edit_or_send(edit_event, txt, kb.as_markup())
     else:
-        await target.answer(txt, attachments=[kb.as_markup()])
+        await _send(target, txt, attachments=[kb.as_markup()])
 
 
 @dp.message_callback(F.callback.payload.startswith("rsnpage:"))
@@ -601,7 +637,7 @@ async def _send_evening_list(target, page: int, edit_event=None):
     if edit_event is not None:
         await _edit_or_send(edit_event, txt, kb.as_markup())
     else:
-        await target.answer(txt, attachments=[kb.as_markup()])
+        await _send(target, txt, attachments=[kb.as_markup()])
 
 
 @dp.message_callback(F.callback.payload == "eclear")
@@ -706,12 +742,12 @@ async def cb_menu_fire(event: MessageCallback):
 async def cb_menu_fired(event: MessageCallback):
     fired = await asyncio.to_thread(sheets.get_fired)
     if not fired:
-        await event.message.answer("Уволенных нет.")
+        await _send(event.message, "Уволенных нет.")
         return
     lines = ["Уволенные сотрудники:"]
     for f in fired:
         lines.append(f"  ⚫ {f['name']} — уволен {f['fired_date'] or '—'}")
-    await event.message.answer("\n".join(lines))
+    await _send(event.message, "\n".join(lines))
 
 
 @dp.message_callback(F.callback.payload == "menu:addemp")
@@ -719,7 +755,7 @@ async def cb_menu_addemp(event: MessageCallback):
     if not await _is_foreman(event):
         return
     _sess(event)["addemp"]["awaiting"] = True
-    await event.message.answer(
+    await _send(event.message, 
         "Введите ФИО нового сотрудника (Фамилия Имя Отчество):")
 
 
@@ -733,14 +769,14 @@ async def on_new_employee_name(event: MessageCreated):
     name = " ".join(event.message.body.text.split())
     exists = await asyncio.to_thread(sheets.employee_exists, name)
     if exists:
-        await event.message.answer(f"⚠️ {name} уже есть в списке. Добавление отменено.")
+        await _send(event.message, f"⚠️ {name} уже есть в списке. Добавление отменено.")
         return
-    await event.message.answer(f"Добавляю {name}… (это займёт несколько секунд)")
+    await _send(event.message, f"Добавляю {name}… (это займёт несколько секунд)")
     ok = await asyncio.to_thread(sheets.add_employee, name)
     if ok:
-        await event.message.answer(f"✅ {name} добавлен в табель.")
+        await _send(event.message, f"✅ {name} добавлен в табель.")
     else:
-        await event.message.answer("Не удалось добавить (возможно, уже существует).")
+        await _send(event.message, "Не удалось добавить (возможно, уже существует).")
 
 
 @dp.message_callback(F.callback.payload == "menu:upload")
@@ -748,7 +784,7 @@ async def cb_menu_upload(event: MessageCallback):
     if not await _is_foreman(event):
         return
     _sess(event)["upload"]["awaiting"] = True
-    await event.message.answer(
+    await _send(event.message, 
         "Пришлите файл Excel (.xlsx) со списком ФИО — по одному в строке.")
 
 
@@ -761,7 +797,7 @@ async def cb_menu_clearall(event: MessageCallback):
         CallbackButton(text="✅ Да, удалить всё", payload="clearall_yes"),
         CallbackButton(text="✖ Отмена", payload="clearall_no"),
     )
-    await event.message.answer(
+    await _send(event.message, 
         "⚠️ ТЕСТ: удалить отметки (день И ночь) у ВСЕХ за сегодня?",
         attachments=[kb.as_markup()])
 
@@ -775,6 +811,33 @@ async def cb_clearall_yes(event: MessageCallback):
 @dp.message_callback(F.callback.payload == "clearall_no")
 async def cb_clearall_no(event: MessageCallback):
     await _finish(event, "Отменено.")
+
+
+@dp.message_callback(F.callback.payload == "menu:clearmsgs")
+async def cb_menu_clearmsgs(event: MessageCallback):
+    """Удаляет все сообщения, отправленные ботом в этом чате с момента
+    включения этой функции, затем показывает меню заново. Сообщения от
+    людей бот удалить не может — так устроена платформа, не ограничение
+    этого кода."""
+    if not await _is_admin(event):
+        return
+    s = _sess(event)
+    msgs = s.get("sent_msgs", [])
+    deleted = 0
+    for m in msgs:
+        try:
+            await m.delete()
+            deleted += 1
+        except Exception:
+            pass
+    s["sent_msgs"] = []
+    try:
+        await event.delete()
+    except Exception:
+        pass
+    is_admin = await _is_admin(event)
+    await _send(event.message, f"🗑 Удалено сообщений бота: {deleted}.\nВыберите действие:",
+                attachments=[_main_menu(is_admin)])
 
 
 async def _send_fire_list(target, page: int):
@@ -793,7 +856,7 @@ async def _send_fire_list(target, page: int):
     if nav:
         kb.row(*nav)
     kb.row(CallbackButton(text="✖ Отмена", payload="firecancel"))
-    await target.answer("Кого увольняем?", attachments=[kb.as_markup()])
+    await _send(target, "Кого увольняем?", attachments=[kb.as_markup()])
 
 
 @dp.message_callback(F.callback.payload.startswith("firepage:"))
@@ -808,12 +871,12 @@ async def cb_fire_pick(event: MessageCallback):
     idx = int(event.callback.payload.split(":")[1])
     employees = await asyncio.to_thread(sheets.get_employees)
     if idx >= len(employees):
-        await event.message.answer("Сотрудник не найден.")
+        await _send(event.message, "Сотрудник не найден.")
         return
     fs = _sess(event)["fire"]
     fs["name"] = employees[idx]
     fs["awaiting_day"] = True
-    await event.message.answer(
+    await _send(event.message, 
         f"Увольняем: {employees[idx]}\n"
         f"Введите дату увольнения в формате ДД.ММ (например, 20.06):")
 
@@ -824,13 +887,13 @@ async def cb_fire_confirm(event: MessageCallback):
     name = fs["name"]
     fire_date = fs["day"]  # теперь строка ДД.ММ или ДД.ММ.ГГГГ
     if not name or not fire_date:
-        await event.message.answer("Данные увольнения потеряны, начните заново.")
+        await _send(event.message, "Данные увольнения потеряны, начните заново.")
         return
     ok = await asyncio.to_thread(sheets.fire_employee, name, fire_date)
     if not ok:
-        await event.message.answer("Не удалось обновить статус.")
+        await _send(event.message, "Не удалось обновить статус.")
         return
-    await event.message.answer(f"⚫ {name} уволен с {fire_date}.")
+    await _send(event.message, f"⚫ {name} уволен с {fire_date}.")
 
     safe = "".join(ch for ch in name if ch.isalnum() or ch in " _-").strip().replace(" ", "_")
     out_path = f"/tmp/Otchet_{safe}.xlsx"
@@ -842,15 +905,15 @@ async def cb_fire_confirm(event: MessageCallback):
                 attachments=[InputMedia(path=path)])
         except Exception as e:
             log.warning("send fire report failed: %s", e)
-            await event.message.answer("График сформирован, но отправка не удалась.")
+            await _send(event.message, "График сформирован, но отправка не удалась.")
     else:
-        await event.message.answer("График пуст — у сотрудника нет отметок.")
+        await _send(event.message, "График пуст — у сотрудника нет отметок.")
 
 
 @dp.message_callback(F.callback.payload == "firecancel")
 async def cb_fire_cancel(event: MessageCallback):
     _sess(event)["fire"].update({"name": None, "day": None, "awaiting_day": False})
-    await event.message.answer("Увольнение отменено.")
+    await _send(event.message, "Увольнение отменено.")
 
 
 # ================= ВВОД ЧИСЕЛ / ДАТ =================
@@ -878,7 +941,7 @@ async def on_date_ddmm(event: MessageCreated):
             CallbackButton(text="✅ Уволить", payload="fireconfirm"),
             CallbackButton(text="✖ Отмена", payload="firecancel"),
         )
-        await event.message.answer(
+        await _send(event.message, 
             f"Уволить {name} с {text}?\nОн исчезнет из списка отметок.",
             attachments=[kb.as_markup()])
         return
@@ -889,7 +952,7 @@ async def on_date_ddmm(event: MessageCreated):
         rot["active"] = False
         rot["name"] = None
         await asyncio.to_thread(sheets.set_rotation_return, name, text)
-        await event.message.answer(
+        await _send(event.message, 
             f"✔ {name}: межвахта до {text}. Напомню за 3 дня до возврата.")
         await _send_reason_list(event.message)
         return
@@ -928,15 +991,15 @@ async def on_file_upload(event: MessageCreated):
     atts = event.message.body.attachments
     file_att = next((a for a in atts if getattr(a, "type", "") == "file"), None)
     if file_att is None:
-        await event.message.answer("Во вложении нет файла. Пришлите .xlsx.")
+        await _send(event.message, "Во вложении нет файла. Пришлите .xlsx.")
         return
 
     filename = getattr(file_att, "filename", "") or ""
     if not filename.lower().endswith((".xlsx", ".xls")):
-        await event.message.answer("Нужен файл Excel (.xlsx).")
+        await _send(event.message, "Нужен файл Excel (.xlsx).")
         return
 
-    await event.message.answer("Загружаю файл, обрабатываю…")
+    await _send(event.message, "Загружаю файл, обрабатываю…")
 
     tmp_path = f"/tmp/upload_{_chat_id(event)}.xlsx"
     try:
@@ -950,12 +1013,12 @@ async def on_file_upload(event: MessageCreated):
             await asyncio.to_thread(urllib.request.urlretrieve, url, tmp_path)
         except Exception as e2:
             log.warning("url download failed: %s", e2)
-            await event.message.answer("Не удалось скачать файл.")
+            await _send(event.message, "Не удалось скачать файл.")
             return
 
     result = await asyncio.to_thread(sheets.add_employees_from_xlsx, tmp_path)
     if result.get("error"):
-        await event.message.answer(result["error"])
+        await _send(event.message, result["error"])
         return
 
     lines = []
@@ -978,7 +1041,7 @@ async def on_file_upload(event: MessageCreated):
         lines += [f"  • {n}" for n in result["invalid"]]
     if not lines:
         lines = ["Файл пуст или не содержит ФИО."]
-    await event.message.answer("\n".join(lines))
+    await _send(event.message, "\n".join(lines))
 
 
 async def main():
