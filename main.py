@@ -28,7 +28,7 @@ from refresh_validation import refresh_validation
 from setup_users import setup_users
 
 from maxapi import Bot, Dispatcher, F
-from maxapi.types import MessageCreated, BotStarted, Command, MessageCallback, CallbackButton
+from maxapi.types import MessageCreated, BotStarted, Command, MessageCallback, CallbackButton, InputMedia
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 logging.basicConfig(level=logging.INFO,
@@ -173,7 +173,6 @@ async def cb_problems(event: MessageCallback):
 @dp.message_callback(F.callback.payload == "menu:summary")
 async def cb_summary(event: MessageCallback):
     await event.message.answer("Формирую свод за месяц…")
-    import datetime as _dt
     month = _MONTHS_GEN[datetime.now().month - 1]
     out_path = f"/tmp/Svod_{month}.xlsx"
     path = await asyncio.to_thread(sheets.build_month_summary, out_path)
@@ -181,11 +180,13 @@ async def cb_summary(event: MessageCallback):
         await event.message.answer("Нет данных для свода.")
         return
     try:
-        await bot.send_file(chat_id=event.message.recipient.chat_id, path=path)
-    except Exception:
+        await bot.send_message(
+            chat_id=event.message.recipient.chat_id,
+            attachments=[InputMedia(path=path)])
+    except Exception as e:
+        log.warning("send summary failed: %s", e)
         await event.message.answer(
-            "Свод сформирован, но отправка файла в MAX не удалась. "
-            "Проверю метод отправки по логам.")
+            "Свод сформирован, но отправка файла не удалась.")
 
 
 def _new_session():
@@ -790,9 +791,13 @@ async def cb_fire_confirm(event: MessageCallback):
     out_path = f"/tmp/Otchet_{safe}.xlsx"
     path = await asyncio.to_thread(sheets.build_work_report, name, out_path)
     if path:
-        await event.message.answer(
-            "График работы сформирован и готов к отправке бухгалтеру "
-            "(почта будет подключена позже).")
+        try:
+            await bot.send_message(
+                chat_id=event.message.recipient.chat_id,
+                attachments=[InputMedia(path=path)])
+        except Exception as e:
+            log.warning("send fire report failed: %s", e)
+            await event.message.answer("График сформирован, но отправка не удалась.")
     else:
         await event.message.answer("График пуст — у сотрудника нет отметок.")
 
