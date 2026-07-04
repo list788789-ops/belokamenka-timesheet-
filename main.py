@@ -20,15 +20,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 import sheets
-from setup_dropdowns import setup_dropdowns
-from reorganize import reorganize
-from employees_sheet import create_employees_sheet
-from rebuild_daynight import rebuild_daynight
-from refresh_validation import refresh_validation
-from setup_users import setup_users
-from add_hire_date import add_hire_date
-from remove_duplicate import remove_duplicate
 from repair_formatting import repair_formatting
+from repair_ab_borders import repair_ab_borders
 
 from maxapi import Bot, Dispatcher, F
 from maxapi.types import MessageCreated, BotStarted, Command, MessageCallback, CallbackButton, InputMedia
@@ -994,68 +987,19 @@ async def main():
     if not MAX_BOT_TOKEN:
         raise RuntimeError("MAX_BOT_TOKEN не задан")
 
-    if os.getenv("RUN_REBUILD_DN") == "1":
-        try:
-            n = await asyncio.to_thread(rebuild_daynight)
-            log.info("Структура ДЕНЬ/НОЧЬ пересоздана: %s сотрудников.", n)
-        except Exception as e:
-            log.exception("Ошибка пересоздания структуры: %s", e)
-
-    if os.getenv("RUN_EMPLOYEES") == "1":
-        try:
-            n = await asyncio.to_thread(create_employees_sheet)
-            log.info("Лист «Сотрудники» создан: %s активных.", n)
-        except Exception as e:
-            log.exception("Ошибка создания листа «Сотрудники»: %s", e)
-
-    if os.getenv("RUN_REORG") == "1":
-        try:
-            n = await asyncio.to_thread(reorganize)
-            log.info("Реорганизация выполнена: %s сотрудников.", n)
-        except Exception as e:
-            log.exception("Ошибка реорганизации: %s", e)
-
-    if os.getenv("RUN_SETUP") == "1":
-        try:
-            n = await asyncio.to_thread(setup_dropdowns)
-            log.info("Выпадающие списки настроены на %s листах.", n)
-        except Exception as e:
-            log.exception("Ошибка настройки списков: %s", e)
-
-    if os.getenv("RUN_REFRESH_DV") == "1":
-        try:
-            n = await asyncio.to_thread(refresh_validation)
-            log.info("Выпадающие списки обновлены (МУ) на 12 листах.")
-        except Exception as e:
-            log.exception("Ошибка обновления списков: %s", e)
-
-    if os.getenv("RUN_USERS") == "1":
-        try:
-            aid = await asyncio.to_thread(setup_users)
-            log.info("Лист «Пользователи» создан. Админ: %s", aid)
-        except Exception as e:
-            log.exception("Ошибка создания пользователей: %s", e)
-
-    if os.getenv("RUN_HIRE_DATE") == "1":
-        try:
-            n = await asyncio.to_thread(add_hire_date)
-            log.info("Дата приёма проставлена: %s активным.", n)
-        except Exception as e:
-            log.exception("Ошибка простановки даты приёма: %s", e)
-
-    if os.getenv("RUN_REMOVE_DUPLICATE") == "1":
-        try:
-            result = await asyncio.to_thread(remove_duplicate)
-            log.info("Удаление дубликата: %s", result)
-        except Exception as e:
-            log.exception("Ошибка удаления дубликата: %s", e)
-
     if os.getenv("RUN_REPAIR_FORMATTING") == "1":
         try:
             result = await asyncio.to_thread(repair_formatting)
             log.info("Восстановление форматирования: %s", result)
         except Exception as e:
             log.exception("Ошибка восстановления форматирования: %s", e)
+
+    if os.getenv("RUN_REPAIR_AB_BORDERS") == "1":
+        try:
+            result = await asyncio.to_thread(repair_ab_borders)
+            log.info("Восстановление границ A/B: %s", result)
+        except Exception as e:
+            log.exception("Ошибка восстановления границ A/B: %s", e)
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(rotation_reminders_job, CronTrigger(hour=9, minute=0))
