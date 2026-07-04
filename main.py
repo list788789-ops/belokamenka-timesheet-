@@ -956,6 +956,14 @@ async def on_file_upload(event: MessageCreated):
     if result["added"]:
         lines.append(f"✅ Добавлено ({len(result['added'])}):")
         lines += [f"  • {n}" for n in result["added"]]
+    if result["fuzzy"]:
+        lines.append(f"🔎 Похоже на существующего, не добавлены ({len(result['fuzzy'])}):")
+        for m in result["fuzzy"]:
+            existing = ", ".join(m["existing"])
+            lines.append(f"  • {m['new']} ↔ {existing}")
+    if result["fired"]:
+        lines.append(f"⚫ Уволены, пропущены ({len(result['fired'])}):")
+        lines += [f"  • {n}" for n in result["fired"]]
     if result["skipped"]:
         lines.append(f"⚠️ Пропущены (уже есть) ({len(result['skipped'])}):")
         lines += [f"  • {n}" for n in result["skipped"]]
