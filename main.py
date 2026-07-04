@@ -57,10 +57,20 @@ def _day_label(day: int) -> str:
 async def _is_foreman(event) -> bool:
     """
     Разрешён ли пользователь. Если его нет в списке — шлём заявку админам
-    и возвращаем False.
+    и возвращаем False. Если Sheets временно перегружен (квота) — говорим
+    об этом прямо, а не делаем вид, что доступа нет.
     """
     cid = _chat_id(event)
-    allowed = await asyncio.to_thread(sheets.is_allowed, cid)
+    try:
+        allowed = await asyncio.to_thread(sheets.is_allowed, cid)
+    except sheets.SheetsBusyError:
+        try:
+            await event.message.answer(
+                "⏳ Google Sheets временно перегружен (превышена квота запросов). "
+                "Попробуйте через минуту.")
+        except Exception:
+            pass
+        return False
     if allowed:
         return True
     # Незнакомый — отправляем заявку админам
@@ -104,7 +114,10 @@ def _main_menu(is_admin: bool = False):
 
 
 async def _is_admin(event) -> bool:
-    role = await asyncio.to_thread(sheets.get_role, _chat_id(event))
+    try:
+        role = await asyncio.to_thread(sheets.get_role, _chat_id(event))
+    except sheets.SheetsBusyError:
+        return False  # при перегрузке Sheets просто не показываем админ-кнопки
     return role == sheets.ROLE_ADMIN
 
 
