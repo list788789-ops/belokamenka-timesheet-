@@ -1180,8 +1180,8 @@ def _daily_codes(date: datetime | None = None) -> dict:
 def build_month_summary(out_path: str, date: datetime | None = None) -> str | None:
     """
     Свод в виде формы Т-13: шапка (ИП, подразделение, период),
-    табельный номер, посуточная сетка двумя блоками (1-15 / 16-конец).
-    В ячейке: С (день+ночь, жирный), НЧ, дневной код, Н (жирный), прочерк.
+    табельный номер, посуточная сетка одним блоком на весь месяц.
+    В ячейке: С (день+ночь, жирный), НЧ, дневной код, Н (красный жирный), прочерк.
     Возвращает путь или None.
     """
     import openpyxl
@@ -1214,48 +1214,40 @@ def build_month_summary(out_path: str, date: datetime | None = None) -> str | No
     ws["A4"] = (f"Отчётный период: 01.{date.month:02d}.{date.year} — "
                 f"{days:02d}.{date.month:02d}.{date.year}")
 
-    def _write_block(start_row: int, day_from: int, day_to: int):
-        """
-        Рисует блок: шапка (Таб.№, ФИО, дни day_from..day_to) + строки.
-        Возвращает номер строки после блока.
-        """
-        ndays = day_to - day_from + 1
-        # Заголовок
-        hc = ws.cell(start_row, 1, "Таб.№")
-        hc.font = bold; hc.alignment = center; hc.border = thin
-        hc = ws.cell(start_row, 2, "ФИО")
-        hc.font = bold; hc.alignment = center; hc.border = thin
-        for k in range(ndays):
-            c = ws.cell(start_row, 3 + k, day_from + k)
-            c.font = bold; c.alignment = center; c.border = thin
-        # Строки сотрудников
-        row = start_row + 1
-        for i, (name, codes) in enumerate(daily.items(), 1):
-            ws.cell(row, 1, i).border = thin
-            ws.cell(row, 1).alignment = center
-            nc = ws.cell(row, 2, name)
-            nc.border = thin; nc.alignment = left
-            for k in range(ndays):
-                day_idx = day_from - 1 + k
-                code = codes[day_idx] if day_idx < len(codes) else ""
-                val = code if code else "—"
-                cc = ws.cell(row, 3 + k, val)
-                cc.border = thin
-                cc.alignment = center
-                if code in ("С", DN_ABSENT):   # сутки и неявки — жирным
-                    cc.font = bold
-            row += 1
-        return row
+    red_bold = Font(bold=True, color="CC0000")
 
-    # Блок 1: дни 1..15
-    after1 = _write_block(6, 1, 15)
-    # Блок 2: дни 16..конец, через пустую строку-разделитель
-    _write_block(after1 + 1, 16, days)
+    # Один блок на весь месяц: Таб.№ | ФИО | дни 1..days
+    start_row = 6
+    hc = ws.cell(start_row, 1, "Таб.№")
+    hc.font = bold; hc.alignment = center; hc.border = thin
+    hc = ws.cell(start_row, 2, "ФИО")
+    hc.font = bold; hc.alignment = center; hc.border = thin
+    for k in range(days):
+        c = ws.cell(start_row, 3 + k, k + 1)
+        c.font = bold; c.alignment = center; c.border = thin
+
+    row = start_row + 1
+    for i, (name, codes) in enumerate(daily.items(), 1):
+        ws.cell(row, 1, i).border = thin
+        ws.cell(row, 1).alignment = center
+        nc = ws.cell(row, 2, name)
+        nc.border = thin; nc.alignment = left
+        for k in range(days):
+            code = codes[k] if k < len(codes) else ""
+            val = code if code else "—"
+            cc = ws.cell(row, 3 + k, val)
+            cc.border = thin
+            cc.alignment = center
+            if code == DN_ABSENT:
+                cc.font = red_bold          # неявка — красный жирный
+            elif code == "С":
+                cc.font = bold              # сутки — жирный
+        row += 1
 
     # --- Ширины ---
     ws.column_dimensions["A"].width = 6
     ws.column_dimensions["B"].width = 30
-    for col in range(3, 3 + 15):
+    for col in range(3, 3 + days):
         ws.column_dimensions[get_column_letter(col)].width = 4
 
     wb.save(out_path)
