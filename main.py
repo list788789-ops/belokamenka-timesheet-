@@ -911,30 +911,42 @@ async def rotation_reminders_job():
 
 # ================= ЗАПУСК =================
 
-# Диагностика приёма файла — ПОСЛЕДНИЙ обработчик message_created,
-# чтобы не перехватывать ФИО/даты. Реагирует только если ждём загрузку.
-@dp.message_created()
+# Диагностика приёма файла — ловит именно вложения (F.message.body.attachments).
+# Логирует структуру, чтобы понять формат payload и способ скачивания.
+@dp.message_created(F.message.body.attachments)
 async def on_file_upload_diag(event: MessageCreated):
     s = _sess(event)
     if not s["upload"].get("awaiting"):
         return
     s["upload"]["awaiting"] = False
 
-    msg = event.message
-    log.info("DIAG upload msg attrs: %s",
-             [a for a in dir(msg) if not a.startswith("_")])
-    body = getattr(msg, "body", None)
-    if body is not None:
-        log.info("DIAG upload body attrs: %s",
-                 [a for a in dir(body) if not a.startswith("_")])
-        for attr in ("attachments", "attachment", "media", "file", "document"):
-            val = getattr(body, attr, None)
+    atts = event.message.body.attachments
+    log.info("DIAG attachments type: %s, len: %s", type(atts).__name__,
+             len(atts) if hasattr(atts, "__len__") else "?")
+    for i, att in enumerate(atts):
+        log.info("DIAG att[%d] type=%s attrs=%s", i, type(att).__name__,
+                 [a for a in dir(att) if not a.startswith("_")])
+        # частые поля вложения
+        for attr in ("type", "payload", "url", "token", "filename", "name", "size"):
+            val = getattr(att, attr, None)
             if val is not None:
-                log.info("DIAG upload body.%s = %r", attr, val)
-    log.info("DIAG upload event attrs: %s",
-             [a for a in dir(event) if not a.startswith("_")])
+                log.info("DIAG att[%d].%s = %r", i, attr, val)
+        # payload обычно содержит token/url
+        payload = getattr(att, "payload", None)
+        if payload is not None:
+            log.info("DIAG att[%d].payload attrs=%s", i,
+                     [a for a in dir(payload) if not a.startswith("_")])
+            for pattr in ("token", "url", "id", "filename", "name"):
+                pval = getattr(payload, pattr, None)
+                if pval is not None:
+                    log.info("DIAG att[%d].payload.%s = %r", i, pattr, pval)
 
-    await event.message.answer("Файл получен. Структуру проверю по логам.")
+    # какие методы скачивания есть у bot
+    dl = [m for m in dir(bot) if any(k in m.lower()
+          for k in ("download", "get_file", "fetch"))]
+    log.info("DIAG bot download-methods: %s", dl)
+
+    await event.message.answer("Файл получен. Структуру вложения проверю по логам.")
 
 
 async def main():
