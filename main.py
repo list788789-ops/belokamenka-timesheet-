@@ -260,12 +260,49 @@ def _chat_id(event):
         return 0
 
 
-def _sess(event):
-    """Возвращает состояние сессии текущего пользователя."""
+def _user_id(event):
+    """
+    Извлекает user_id отправителя/нажавшего кнопку — нужен, чтобы делить
+    сессии между людьми внутри ОДНОГО группового чата (там у всех общий
+    chat_id, но разные user_id). Порядок попыток покрывает и обычное
+    сообщение, и нажатие inline-кнопки (там отправитель — в другом поле).
+    Не проверено по официальной документации maxapi — если в группе с
+    несколькими людьми сессии всё равно будут путаться, значит ни один
+    из этих путей не подошёл и нужно смотреть реальную структуру event.
+    """
+    for path in (
+        lambda e: e.callback.user.user_id,
+        lambda e: e.callback.user_id,
+        lambda e: e.message.sender.user_id,
+        lambda e: e.sender.user_id,
+    ):
+        try:
+            uid = path(event)
+            if uid is not None:
+                return uid
+        except Exception:
+            continue
+    return None
+
+
+def _sess_key(event):
+    """
+    Ключ сессии: (chat_id, user_id), если user_id удалось достать —
+    так один групповой чат не смешивает состояние разных людей.
+    Если user_id недоступен — просто chat_id (личный диалог с ботом,
+    там chat_id и так уникален на человека).
+    """
     cid = _chat_id(event)
-    if cid not in _sessions:
-        _sessions[cid] = _new_session()
-    return _sessions[cid]
+    uid = _user_id(event)
+    return (cid, uid) if uid is not None else cid
+
+
+def _sess(event):
+    """Возвращает состояние сессии текущего пользователя (в группе — per-user)."""
+    key = _sess_key(event)
+    if key not in _sessions:
+        _sessions[key] = _new_session()
+    return _sessions[key]
 
 
 async def _send(target, text, attachments=None):
