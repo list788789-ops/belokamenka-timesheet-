@@ -235,6 +235,9 @@ async def cb_summary(event: MessageCallback):
 
 
 _sessions = {}
+# Сообщения бота по chat_id (не по человеку) — очистка чата это операция
+# на уровне всего чата, не привязана к тому, кто именно нажал кнопку.
+_chat_sent_msgs = {}
 
 
 def _new_session():
@@ -247,7 +250,6 @@ def _new_session():
         "rotation": {"name": None, "active": False},
         "addemp": {"awaiting": False},
         "upload": {"awaiting": False},
-        "sent_msgs": [],  # сообщения бота в этом чате — для «Удалить сообщения бота»
     }
 
 
@@ -320,8 +322,7 @@ async def _send(target, text, attachments=None):
         msg = await target.answer(text)
     try:
         cid = _chat_id(target)
-        s = _sessions.setdefault(cid, _new_session())
-        s.setdefault("sent_msgs", []).append(msg)
+        _chat_sent_msgs.setdefault(cid, []).append(msg)
     except Exception:
         log.warning("Не удалось запомнить отправленное сообщение для очистки")
     return msg
@@ -639,6 +640,7 @@ async def cb_set_reason(event: MessageCallback):
         rot = _sess(event)["rotation"]
         rot["name"] = name
         rot["active"] = True
+        rot["prompt_event"] = event  # запомнили, чтобы удалить после ввода даты
         await asyncio.to_thread(sheets.set_reason, name, code)
         await _edit_or_send(
             event,
@@ -858,8 +860,8 @@ async def cb_menu_clearmsgs(event: MessageCallback):
     этого кода."""
     if not await _is_admin(event):
         return
-    s = _sess(event)
-    msgs = s.get("sent_msgs", [])
+    cid = _chat_id(event)
+    msgs = _chat_sent_msgs.get(cid, [])
     deleted = 0
     for m in msgs:
         try:
@@ -867,7 +869,7 @@ async def cb_menu_clearmsgs(event: MessageCallback):
             deleted += 1
         except Exception:
             pass
-    s["sent_msgs"] = []
+    _chat_sent_msgs[cid] = []
     try:
         await event.delete()
     except Exception:
@@ -988,8 +990,18 @@ async def on_date_ddmm(event: MessageCreated):
         name = rot["name"]
         rot["active"] = False
         rot["name"] = None
+        prompt = rot.pop("prompt_event", None)
         await asyncio.to_thread(sheets.set_rotation_return, name, text)
-        await _send(event.message, 
+        if prompt is not None:
+            for obj in (prompt, getattr(prompt, "message", None)):
+                if obj is None:
+                    continue
+                try:
+                    await obj.delete()
+                    break
+                except Exception:
+                    continue
+        await _send(event.message,
             f"✔ {name}: межвахта до {text}. Напомню за 3 дня до возврата.")
         await _send_reason_list(event.message)
         return
