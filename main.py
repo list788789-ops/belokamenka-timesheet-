@@ -198,9 +198,23 @@ async def cb_today(event: MessageCallback):
         f"📋 Мигр.учёт: {s['migr']}",
     ]
     if s["absent_list"]:
+        order = {sheets.DN_SICK: 0, sheets.DN_ROTATION: 1,
+                  sheets.DN_ABSENT: 2, sheets.DN_MIGR: 3}
+        labels = {
+            sheets.DN_SICK: "🤒 Больничный",
+            sheets.DN_ROTATION: "✈️ Межвахта",
+            sheets.DN_ABSENT: "❌ Неявка",
+            sheets.DN_MIGR: "📋 Мигр.учёт",
+        }
+        grouped = sorted(s["absent_list"],
+                          key=lambda t: (order.get(t[1], 99), t[0].strip().lower()))
         lines.append("\nОтсутствуют/особое:")
-        for name, code in s["absent_list"]:
-            lines.append(f"  • {name} — {code}")
+        current_code = None
+        for name, code in grouped:
+            if code != current_code:
+                current_code = code
+                lines.append(f"  {labels.get(code, code)}:")
+            lines.append(f"    • {name}")
     await _send(event.message, "\n".join(lines))
 
 
