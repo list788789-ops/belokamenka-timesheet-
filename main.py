@@ -195,6 +195,7 @@ async def cb_today(event: MessageCallback):
         f"Табель за {_day_label(datetime.now().day)}:",
         f"☀️ День: {s['day']}   🌙 Ночь: {s['night']}   😴 Отдых: {s['rest']}",
         f"🤒 Больн.: {s['sick']}   ✈️ Межвахта: {s['rotation']}   ❌ Неявка: {s['absent']}",
+        f"📋 Мигр.учёт: {s['migr']}",
     ]
     if s["absent_list"]:
         lines.append("\nОтсутствуют/особое:")
@@ -248,6 +249,7 @@ def _new_session():
         "clear_e": {"page": 0},
         "fire": {"page": 0, "day": None, "name": None, "awaiting_day": False},
         "rotation": {"name": None, "active": False},
+        "actual_return": {"name": None, "active": False, "page": 0},
         "addemp": {"awaiting": False},
         "upload": {"awaiting": False},
     }
@@ -523,6 +525,15 @@ async def cb_mark_day(event: MessageCallback):
             CallbackButton(text="✖ Отмена", payload=f"mpage:{_sess(event)['morning']['page']}"),
         )
         await _edit_or_send(event, f"⚠️ {warn}\nВсё равно поставить день?", kb.as_markup())
+        return
+    rot_warn = await asyncio.to_thread(sheets.check_rotation_return_conflict, name)
+    if rot_warn:
+        ar = _sess(event)["actual_return"]
+        ar["name"] = name
+        ar["active"] = True
+        ar["page"] = _sess(event)["morning"]["page"]
+        await _edit_or_send(
+            event, f"⚠️ {rot_warn}\nУкажите дату фактического возврата (ДД.ММ):")
         return
     await asyncio.to_thread(sheets.mark_day, name)
     await _send_morning_list(event.message, _sess(event)["morning"]["page"], edit_event=event)
@@ -968,6 +979,7 @@ async def on_date_ddmm(event: MessageCreated):
     s = _sess(event)
     fs = s["fire"]
     rot = s["rotation"]
+    ar = s["actual_return"]
     text = event.message.body.text.strip()
 
     # 1. Увольнение
@@ -985,7 +997,23 @@ async def on_date_ddmm(event: MessageCreated):
             attachments=[kb.as_markup()])
         return
 
-    # 2. Межвахта
+    # 2. Фактический возврат с межвахты (после строгого предупреждения)
+    if ar.get("active"):
+        name = ar["name"]
+        ar["active"] = False
+        ar["name"] = None
+        page = ar.get("page", 0)
+        await asyncio.to_thread(sheets.mark_day, name)
+        try:
+            await event.message.delete()
+        except Exception:
+            pass
+        await _send(event.message,
+            f"✔ {name}: фактический возврат с межвахты {text} зафиксирован. День проставлен.")
+        await _send_morning_list(event.message, page)
+        return
+
+    # 3. Межвахта (постановка, дата примерная/ожидаемая)
     if rot.get("active"):
         name = rot["name"]
         rot["active"] = False
@@ -1001,6 +1029,10 @@ async def on_date_ddmm(event: MessageCreated):
                     break
                 except Exception:
                     continue
+        try:
+            await event.message.delete()
+        except Exception:
+            pass  # платформа не разрешает — молча не удаляем, ничего не ломаем
         await _send(event.message,
             f"✔ {name}: межвахта до {text}. Напомню за 3 дня до возврата.")
         await _send_reason_list(event.message)
