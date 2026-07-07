@@ -186,6 +186,33 @@ def _grid_set(ws, row: int, col: int, value: str):
     grid[ri][ci] = value
 
 
+def check_rotation_return_conflict(name: str, date: datetime | None = None) -> str | None:
+    """
+    Проверка перед простановкой ДНЯ (Д): если вчера у сотрудника стояла
+    межвахта (МЖ), значит возврат происходит без штатного оформления.
+    Возвращает строгий текст предупреждения или None.
+    """
+    date = date or datetime.now()
+    from datetime import timedelta
+    yday = date - timedelta(days=1)
+    try:
+        _, ygrid = _read_grid(yday)
+        yd_idx = _day_col(yday) - 1
+        for r in ygrid[FIRST_DATA_ROW - 1:]:
+            if len(r) > NAME_COL - 1 and r[NAME_COL - 1].strip() == name.strip():
+                yval = r[yd_idx].strip() if len(r) > yd_idx else ""
+                if yval == DN_ROTATION:
+                    return (
+                        f"ВНИМАНИЕ: {name} был на межвахте. Возврат сотрудника "
+                        f"на объект без надлежащего уведомления и постановки на "
+                        f"миграционный учёт является нарушением миграционного "
+                        f"законодательства РФ.")
+                break
+    except Exception:
+        pass
+    return None
+
+
 def check_day_conflict(name: str, date: datetime | None = None) -> str | None:
     """
     Проверки перед простановкой ДНЯ (Д) сотруднику:
@@ -900,7 +927,7 @@ def day_summary(date: datetime | None = None) -> dict:
     d_idx = _day_col(date) - 1
     n_idx = _night_col(date) - 1
 
-    day_work = night_work = rest = sick = rotation = absent = 0
+    day_work = night_work = rest = sick = rotation = absent = migr = 0
     absent_list = []
 
     for r in grid[FIRST_DATA_ROW - 1:]:
@@ -925,13 +952,16 @@ def day_summary(date: datetime | None = None) -> dict:
         elif dval == DN_ABSENT:
             absent += 1
             absent_list.append((name, dval))
+        elif dval == DN_MIGR:
+            migr += 1
+            absent_list.append((name, dval))
 
         if nval == DN_NIGHT:
             night_work += 1
 
     return {
         "day": day_work, "night": night_work, "rest": rest,
-        "sick": sick, "rotation": rotation, "absent": absent,
+        "sick": sick, "rotation": rotation, "absent": absent, "migr": migr,
         "absent_list": absent_list, "total": len(active),
     }
 
