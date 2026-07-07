@@ -263,7 +263,8 @@ def _new_session():
         "clear_e": {"page": 0},
         "fire": {"page": 0, "day": None, "name": None, "awaiting_day": False},
         "rotation": {"name": None, "active": False},
-        "actual_return": {"name": None, "active": False, "page": 0},
+        "actual_return": {"name": None, "active": False, "page": 0,
+                           "action": "day", "flow": "morning"},
         "addemp": {"awaiting": False},
         "upload": {"awaiting": False},
     }
@@ -545,6 +546,8 @@ async def cb_mark_day(event: MessageCallback):
         ar = _sess(event)["actual_return"]
         ar["name"] = name
         ar["active"] = True
+        ar["action"] = "day"
+        ar["flow"] = "morning"
         ar["page"] = _sess(event)["morning"]["page"]
         await _edit_or_send(
             event, f"⚠️ {rot_warn}\nУкажите дату фактического возврата (ДД.ММ):")
@@ -671,7 +674,36 @@ async def cb_set_reason(event: MessageCallback):
             event,
             f"{name}: межвахта. До какого числа? Введите дату возврата (ДД.ММ):")
         return
+    if code == sheets.DN_MIGR:
+        migr_warn = await asyncio.to_thread(sheets.check_migr_after_rotation, name)
+        if migr_warn:
+            kb = InlineKeyboardBuilder()
+            kb.row(
+                CallbackButton(text="✅ Всё равно МУ", payload=f"fmigr:{name}"),
+                CallbackButton(text="✖ Отмена", payload=f"rsn:{name}"),
+            )
+            await _edit_or_send(event, f"⚠️ {migr_warn}\nВсё равно поставить МУ?", kb.as_markup())
+            return
     await asyncio.to_thread(sheets.set_reason, name, code)
+    if code == sheets.DN_MIGR:
+        await _warn_if_too_many_migr(event.message)
+    await _send_reason_list(event.message, edit_event=event)
+
+
+async def _warn_if_too_many_migr(target):
+    """Если МУ за сегодня стало больше порога — отдельное предупреждение."""
+    n = await asyncio.to_thread(sheets.count_migr_today)
+    if n > sheets.MIGR_DAILY_THRESHOLD:
+        await _send(target,
+            f"⚠️ Сегодня на мигр.учёте уже {n} человек (порог {sheets.MIGR_DAILY_THRESHOLD}). "
+            f"Риск вопросов от заказчика — проверьте обоснованность.")
+
+
+@dp.message_callback(F.callback.payload.startswith("fmigr:"))
+async def cb_force_migr(event: MessageCallback):
+    name = event.callback.payload.split(":", 1)[1]
+    await asyncio.to_thread(sheets.set_reason, name, sheets.DN_MIGR)
+    await _warn_if_too_many_migr(event.message)
     await _send_reason_list(event.message, edit_event=event)
 
 
@@ -773,6 +805,17 @@ async def cb_mark_night(event: MessageCallback):
             CallbackButton(text="✖ Отмена", payload=f"epage:{_sess(event)['evening']['page']}"),
         )
         await _edit_or_send(event, f"⚠️ {warn}\nВсё равно поставить ночь?", kb.as_markup())
+        return
+    rot_warn = await asyncio.to_thread(sheets.check_rotation_return_conflict, name)
+    if rot_warn:
+        ar = _sess(event)["actual_return"]
+        ar["name"] = name
+        ar["active"] = True
+        ar["action"] = "night"
+        ar["flow"] = "evening"
+        ar["page"] = _sess(event)["evening"]["page"]
+        await _edit_or_send(
+            event, f"⚠️ {rot_warn}\nУкажите дату фактического возврата (ДД.ММ):")
         return
     await asyncio.to_thread(sheets.mark_night, name)
     await _send_evening_list(event.message, _sess(event)["evening"]["page"], edit_event=event)
@@ -1014,17 +1057,28 @@ async def on_date_ddmm(event: MessageCreated):
     # 2. Фактический возврат с межвахты (после строгого предупреждения)
     if ar.get("active"):
         name = ar["name"]
+        action = ar.get("action", "day")
+        flow = ar.get("flow", "morning")
+        page = ar.get("page", 0)
         ar["active"] = False
         ar["name"] = None
-        page = ar.get("page", 0)
-        await asyncio.to_thread(sheets.mark_day, name)
+        if action == "night":
+            await asyncio.to_thread(sheets.mark_night, name)
+            slot_label = "Ночь"
+        else:
+            await asyncio.to_thread(sheets.mark_day, name)
+            slot_label = "День"
         try:
             await event.message.delete()
         except Exception:
             pass
         await _send(event.message,
-            f"✔ {name}: фактический возврат с межвахты {text} зафиксирован. День проставлен.")
-        await _send_morning_list(event.message, page)
+            f"✔ {name}: фактический возврат с межвахты {text} зафиксирован. "
+            f"{slot_label} проставлен(а).")
+        if flow == "evening":
+            await _send_evening_list(event.message, page)
+        else:
+            await _send_morning_list(event.message, page)
         return
 
     # 3. Межвахта (постановка, дата примерная/ожидаемая)
