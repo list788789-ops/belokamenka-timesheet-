@@ -186,6 +186,51 @@ def _grid_set(ws, row: int, col: int, value: str):
     grid[ri][ci] = value
 
 
+# Порог одновременных МУ за день — выше считается подозрительным
+# (риск претензий заказчика при массовой постановке на мигр.учёт)
+MIGR_DAILY_THRESHOLD = 5
+
+
+def count_migr_today(date: datetime | None = None) -> int:
+    """Сколько активных сотрудников сейчас стоит на МУ за указанный день."""
+    date = date or datetime.now()
+    ws, grid = _read_grid(date)
+    d_idx = _day_col(date) - 1
+    active = set(get_employees(date))
+    count = 0
+    for r in grid[FIRST_DATA_ROW - 1:]:
+        if len(r) > NAME_COL - 1 and r[NAME_COL - 1].strip() in active:
+            dval = r[d_idx].strip() if len(r) > d_idx else ""
+            if dval == DN_MIGR:
+                count += 1
+    return count
+
+
+def check_migr_after_rotation(name: str, date: datetime | None = None) -> str | None:
+    """
+    Проверка перед простановкой МУ (мигр.учёт): если вчера у сотрудника
+    стояла межвахта (МЖ), переход МЖ→МУ считается подозрительным —
+    может маскировать невыход на работу под административный статус.
+    Возвращает текст предупреждения или None.
+    """
+    date = date or datetime.now()
+    from datetime import timedelta
+    yday = date - timedelta(days=1)
+    try:
+        _, ygrid = _read_grid(yday)
+        yd_idx = _day_col(yday) - 1
+        for r in ygrid[FIRST_DATA_ROW - 1:]:
+            if len(r) > NAME_COL - 1 and r[NAME_COL - 1].strip() == name.strip():
+                yval = r[yd_idx].strip() if len(r) > yd_idx else ""
+                if yval == DN_ROTATION:
+                    return (f"{name} вчера был на межвахте (МЖ). Переход МЖ→МУ "
+                            f"подозрителен — проверьте, не маскирует ли это неявку.")
+                break
+    except Exception:
+        pass
+    return None
+
+
 def check_rotation_return_conflict(name: str, date: datetime | None = None) -> str | None:
     """
     Проверка перед простановкой ДНЯ (Д): если вчера у сотрудника стояла
