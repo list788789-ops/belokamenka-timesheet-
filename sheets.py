@@ -1424,6 +1424,90 @@ def build_month_summary(out_path: str, date: datetime | None = None) -> str | No
     for col in range(3, 3 + days):
         ws.column_dimensions[get_column_letter(col)].width = 4
 
+    # --- Сырые day/night значения для двух итоговых таблиц ниже ---
+    active = set(get_employees(date))
+    ws_src = _worksheet_for(date)
+    grid_src = ws_src.get_all_values()
+
+    day_totals = {code: [0] * days for code in
+                  (DN_DAY, DN_NIGHT, DN_SICK, DN_ROTATION, DN_ABSENT, DN_MIGR, DN_WEEKEND)}
+    emp_stats = {}  # ФИО -> {"shifts": кол-во смен, "days": отработано дней}
+
+    for r in grid_src[FIRST_DATA_ROW - 1:]:
+        if len(r) < NAME_COL:
+            continue
+        name = r[NAME_COL - 1].strip()
+        if not name or name not in active:
+            continue
+        shifts = 0
+        worked_days = 0
+        for d in range(days):
+            d_idx = (FIRST_DAY_COL - 1) + d * 2
+            n_idx = d_idx + 1
+            dval = r[d_idx].strip() if len(r) > d_idx else ""
+            nval = r[n_idx].strip() if len(r) > n_idx else ""
+            if dval in day_totals:
+                day_totals[dval][d] += 1
+            if nval == DN_NIGHT:
+                day_totals[DN_NIGHT][d] += 1
+            if dval == DN_DAY:
+                shifts += 1
+            if nval == DN_NIGHT:
+                shifts += 1
+            if dval == DN_DAY or nval == DN_NIGHT:
+                worked_days += 1
+        emp_stats[name] = {"shifts": shifts, "days": worked_days}
+
+    # --- ТАБЛИЦА 1: Итог за день ---
+    row += 2
+    ws.cell(row, 1, "Итог за день").font = title_font
+    row += 1
+    hc = ws.cell(row, 1, "Показатель")
+    hc.font = header_font; hc.alignment = center; hc.border = thin; hc.fill = header_fill
+    for k in range(days):
+        c = ws.cell(row, 2 + k, k + 1)
+        c.font = header_font; c.alignment = center; c.border = thin; c.fill = header_fill
+    row += 1
+
+    day_row_labels = [
+        (DN_DAY, "☀️ День"),
+        (DN_NIGHT, "🌙 Ночь"),
+        (DN_SICK, "🤒 Больничный"),
+        (DN_ROTATION, "✈️ Межвахта"),
+        (DN_ABSENT, "❌ Неявка"),
+        (DN_MIGR, "📋 Мигр.учёт"),
+        (DN_WEEKEND, "🏖 Выходной"),
+    ]
+    for code, label in day_row_labels:
+        ws.cell(row, 1, label).border = thin
+        ws.cell(row, 1).alignment = left
+        for k in range(days):
+            c = ws.cell(row, 2 + k, day_totals[code][k])
+            c.border = thin
+            c.alignment = center
+        row += 1
+
+    # --- ТАБЛИЦА 2: Общий итог за месяц ---
+    row += 2
+    ws.cell(row, 1, "Общий итог за месяц").font = title_font
+    row += 1
+    hc = ws.cell(row, 1, "ФИО")
+    hc.font = header_font; hc.alignment = left; hc.border = thin; hc.fill = header_fill
+    hc = ws.cell(row, 2, "Кол-во смен")
+    hc.font = header_font; hc.alignment = center; hc.border = thin; hc.fill = header_fill
+    hc = ws.cell(row, 3, "Отработано дней")
+    hc.font = header_font; hc.alignment = center; hc.border = thin; hc.fill = header_fill
+    row += 1
+    for name in ordered_names:
+        st = emp_stats.get(name, {"shifts": 0, "days": 0})
+        nc = ws.cell(row, 1, name)
+        nc.border = thin; nc.alignment = left
+        sc = ws.cell(row, 2, st["shifts"])
+        sc.border = thin; sc.alignment = center
+        dc = ws.cell(row, 3, st["days"])
+        dc.border = thin; dc.alignment = center
+        row += 1
+
     wb.save(out_path)
     return out_path
 
