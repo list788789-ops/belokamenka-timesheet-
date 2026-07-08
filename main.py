@@ -387,6 +387,15 @@ async def _show_problems(event_or_target):
     await _send(msg, "\n".join(lines))
 
 
+def _hint(text: str) -> str:
+    """Добавляет подсказку про добавление явки после завершения утра —
+    механизм существует ('Очистить сотрудника' → отметить заново),
+    просто неочевиден без прямого указания."""
+    return (text + "\n\nℹ️ Если нужно добавить кого-то в явку после завершения — "
+            "«🧹 Очистить сотрудника», выбрать человека, затем «◀ К отметке» "
+            "и отметить его заново.")
+
+
 async def _finish(event_or_target, text):
     """
     Финальное сообщение без кнопок: удаляет текущее сообщение с кнопками
@@ -568,7 +577,7 @@ async def cb_morning_done(event: MessageCallback):
     """Присутствующие отмечены — переходим к причинам для оставшихся."""
     remaining = await asyncio.to_thread(sheets.get_unmarked_day)
     if not remaining:
-        await _finish(event, "Все отмечены. Утро завершено.")
+        await _finish(event, _hint("Все отмечены. Утро завершено."))
         await _show_problems(event)
         return
     _sess(event)["morning"]["reason_mode"] = True
@@ -579,7 +588,7 @@ async def _send_reason_list(target, edit_event=None, page: int = 0):
     """Оставшиеся без отметки → выбор причины (с пагинацией и «Завершить»)."""
     remaining = await asyncio.to_thread(sheets.get_unmarked_day)
     if not remaining:
-        txt = "Причины проставлены всем. Утро завершено."
+        txt = _hint("Причины проставлены всем. Утро завершено.")
         if edit_event is not None:
             await _finish(edit_event, txt)
             await _show_problems(edit_event)
@@ -618,7 +627,7 @@ async def cb_reason_page(event: MessageCallback):
 async def cb_reason_finish(event: MessageCallback):
     remaining = await asyncio.to_thread(sheets.get_unmarked_day)
     if not remaining:
-        await _edit_or_send(event, "Все размечены. Утро завершено.")
+        await _edit_or_send(event, _hint("Все размечены. Утро завершено."))
         return
     kb = InlineKeyboardBuilder()
     kb.row(
@@ -635,7 +644,7 @@ async def cb_reason_finish(event: MessageCallback):
 @dp.message_callback(F.callback.payload == "rsnfinish_yes")
 async def cb_reason_finish_yes(event: MessageCallback):
     n = await asyncio.to_thread(sheets.fill_unmarked_absent)
-    await _finish(event, f"Утро завершено. Неявка проставлена: {n} чел.")
+    await _finish(event, _hint(f"Утро завершено. Неявка проставлена: {n} чел."))
     await _show_problems(event)
 
 
