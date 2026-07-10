@@ -681,7 +681,9 @@ async def cb_set_reason(event: MessageCallback):
         await asyncio.to_thread(sheets.set_reason, name, code)
         await _edit_or_send(
             event,
-            f"{name}: межвахта. До какого числа? Введите дату возврата (ДД.ММ):")
+            f"{name}: межвахта.\n"
+            f"⚠️ Укажите дату ВОЗВРАТА на объект (когда он вернётся к работе), "
+            f"а не дату отъезда на межвахту.\nФормат: ДД.ММ")
         return
     if code == sheets.DN_MIGR:
         migr_warn = await asyncio.to_thread(sheets.check_migr_after_rotation, name)
@@ -1107,8 +1109,9 @@ async def on_date_ddmm(event: MessageCreated):
             is_valid_future = False
         if not is_valid_future:
             await _send(event.message,
-                f"⚠️ Дата {text} — сегодня или в прошлом. Дата возврата должна "
-                f"быть в будущем (когда сотрудник реально вернётся). "
+                f"⚠️ Дата {text} — сегодня или в прошлом.\n"
+                f"Нужна дата ВОЗВРАТА на объект (когда сотрудник вернётся к "
+                f"работе), а не дата отъезда на межвахту и не сегодняшнее число.\n"
                 f"Введите дату возврата ещё раз (ДД.ММ):")
             return  # rot остаётся активным — следующее сообщение проверим заново
         rot["active"] = False
