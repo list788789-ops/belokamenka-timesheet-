@@ -1093,6 +1093,24 @@ async def on_date_ddmm(event: MessageCreated):
     # 3. Межвахта (постановка, дата примерная/ожидаемая)
     if rot.get("active"):
         name = rot["name"]
+        # Дата возврата должна быть в будущем — если ввели сегодня или
+        # прошедшее число, это почти наверняка ошибка ввода, а не реальный
+        # план (нельзя вернуться в тот же день, когда уходишь на межвахту).
+        is_valid_future = False
+        try:
+            parts = text.split(".")
+            d, m = int(parts[0]), int(parts[1])
+            y = int(parts[2]) if len(parts) > 2 else datetime.now().year
+            candidate = datetime(y, m, d).date()
+            is_valid_future = candidate > datetime.now().date()
+        except Exception:
+            is_valid_future = False
+        if not is_valid_future:
+            await _send(event.message,
+                f"⚠️ Дата {text} — сегодня или в прошлом. Дата возврата должна "
+                f"быть в будущем (когда сотрудник реально вернётся). "
+                f"Введите дату возврата ещё раз (ДД.ММ):")
+            return  # rot остаётся активным — следующее сообщение проверим заново
         rot["active"] = False
         rot["name"] = None
         prompt = rot.pop("prompt_event", None)
